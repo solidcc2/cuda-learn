@@ -248,7 +248,7 @@ void softmax_gpu_single_block(float* input, int n, float* output) {
 }
 
 __global__ void _cu_online_softmax_single_block(float* input, int n, float* output) {
-    extern float __shared__ block_buf[];
+    extern __shared__ float block_buf[];
     float* maxs = block_buf;
     float* sums = block_buf + blockDim.x;
     maxs[threadIdx.x] = -INFINITY;
@@ -371,13 +371,12 @@ int main() {
     online_softmax_cpu(input, input_len, osm_cpu);
     std::cout << "cpu check: " 
         << (check_result(sm_cpu, input_len, osm_cpu) ? "right" : "wrong") << std::endl;
-    free(sm_cpu);
 
     float* sm_gpu = (float*)malloc(sizeof(float)* input_len);
     softmax_gpu(input, input_len, sm_gpu);
     std::cout << "softmax_gpu check: "
         << (check_result(sm_cpu, input_len, sm_gpu) ? "right" : "wrong") << std::endl;
-    free(osm_cpu);
+    free(sm_gpu);
 
     float* sm_gpu_single_block = (float*)malloc(sizeof(float)* input_len);
     softmax_gpu_single_block(input, input_len, sm_gpu_single_block);
@@ -386,10 +385,12 @@ int main() {
     free(sm_gpu_single_block);
 
     float* osm_gpu_single_block = (float*)malloc(sizeof(float)* input_len);
-    online_softmax_gpu_single_block(input, input_len, sm_gpu_single_block);
+    online_softmax_gpu_single_block(input, input_len, osm_gpu_single_block);
     std::cout << "online_softmax_gpu_single_block check: "
-        << (check_result(sm_cpu, input_len, sm_gpu_single_block) ? "right" : "wrong") << std::endl;
-    free(osm_gpu_single_block);    
-    
+        << (check_result(sm_cpu, input_len, osm_gpu_single_block) ? "right" : "wrong") << std::endl;
+    free(osm_gpu_single_block);
+
+    free(osm_cpu);
+    free(sm_cpu);
     free(input);
 }
