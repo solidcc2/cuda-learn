@@ -1,4 +1,10 @@
+## TODO
+### 20260321
+写一个触发大量bank conflict的代码，并nsys查看效果
+
 ## changelog
+### 20260321
+matmul cpu朴素 & cpu转置后完成。
 
 ### 20260320
 transpose朴素gpu版本 & shared_memory tile版本 & bank conflict solve版本
