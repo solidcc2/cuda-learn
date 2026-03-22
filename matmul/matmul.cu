@@ -127,8 +127,68 @@ namespace matmul {
         cpu_v2_trans(A, BT, C, A_rows, B_cols, inner);
     }
 
-    void gpu_v1_trans(float* A, float* BT, float* C, int A_rows, int BT_rows, int cols) {
-        
+    __global__ void _cu_withtrans(float* A, float* BT, float* C, int A_rows, int BT_rows, int cols) {
+        extern __shared__ float buf[];
+        int step = min(blockDim.x, blockDim.y);
+        float* tile_A = buf;    // step * blockDim.y
+        float* tile_BT = tile_A + blockDim.y * step;    // step * blockDim.x
+        unsigned int p_row, p_step;
+        p_row = blockDim.x > blockDim.y ? threadIdx.x : threadIdx.y;
+        p_step = blockDim.x > blockDim.y ? threadIdx.y : threadIdx.x;
+        int tid_x = blockDim.x * blockIdx.x + threadIdx.x;
+        int tid_y = blockDim.y * blockIdx.y + threadIdx.y;
+        float ret = 0.0f;
+        for(int i=0; i<(cols + step - 1)/step; i++){
+            if (p_row < blockDim.y && i*step + p_step < cols && tid_y < A_rows) {
+                tile_A[p_row * step + p_step] = A[tid_y * cols + i*step + p_step];
+            }
+            if (p_row < blockDim.x && i*step + p_step < cols && tid_x < BT_rows) {
+                tile_BT[p_row * step + p_step] = BT[tid_x * cols + i*step + p_step];
+            }
+            __syncthreads();
+            for(int k=i*step; k<cols && k<i*step+step; k++) {
+                if (tid_y < A_rows && tid_x < BT_rows) {
+                    ret += tile_A[threadIdx.y * step + k-i*step] * tile_BT[threadIdx.x * step + k-i*step];
+                }
+            }
+            __syncthreads();
+        }
+        if (tid_y < A_rows && tid_x < BT_rows) {
+            C[tid_y * BT_rows + tid_x] = ret;
+        }
+    }
+
+    void gpu_withtrans(float* A, float* BT, float* C, int A_rows, int BT_rows, int cols) {
+        float* d_A, *d_BT, *d_C;
+        cudaMalloc(&d_A, sizeof(float)*A_rows*cols);
+        cudaMalloc(&d_BT, sizeof(float)*BT_rows*cols);
+        cudaMalloc(&d_C, sizeof(float)*A_rows*BT_rows);
+        cudaMemcpy(d_A, A, sizeof(float) *A_rows * cols, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_BT, BT, sizeof(float) *BT_rows * cols, cudaMemcpyHostToDevice);
+        dim3 block(32, 16, 1);
+        dim3 grid((BT_rows+block.x-1)%block.x, (BT_rows+block.x-1)/block.x, 1);
+        cudaEvent_t start, end;
+        cudaEventCreate(&start);
+        cudaEventCreate(&end);
+        cudaEventRecord(start);
+        _cu_withtrans<<<grid, block, 
+            sizeof(float) * min(block.x, block.y) * (block.x+block.y)>>>(d_A, d_BT, d_C, A_rows, BT_rows, cols);
+        cudaEventRecord(end);
+        cudaEventSynchronize(end);
+        float use;
+        cudaEventElapsedTime(&use, start, end);
+        std::cout << "gpu_withtrans use: " << use << "ms" << std::endl;
+        cudaMemcpy(C, d_C, sizeof(float) * A_rows * BT_rows, cudaMemcpyDeviceToHost);
+        cudaFree(d_A);
+        cudaFree(d_BT);
+        cudaFree(d_C);
+    }
+
+    void gpu(float* A, float* B, float* C, int A_rows, int inner, int B_cols) {
+        float* BT = new float[B_cols * inner];
+        transpose::gpu(B, BT, inner, B_cols);
+        gpu_withtrans(A, BT, C, A_rows, B_cols, inner);
+        delete[] BT;
     }
 
     bool check_equal(float* A, float* B, int rows, int cols) {
@@ -160,4 +220,11 @@ int main() {
     std::cout << "cpu_v2: " 
         << (matmul::check_equal(C_base, C_cpu_v2, A_rows, B_cols) ? "right" : "wrong") 
         << std::endl;
+    
+    float* C_gpu = new float[A_rows * B_cols];
+    matmul::gpu(A, B, C_gpu, A_rows, A_cols, B_cols);
+    std::cout << "matmul::gpu: " 
+        << (matmul::check_equal(C_base, C_gpu, A_rows, B_cols) ? "right" : "wrong") 
+        << std::endl;
+
 }

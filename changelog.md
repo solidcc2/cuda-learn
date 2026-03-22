@@ -3,6 +3,10 @@
 写一个触发大量bank conflict的代码，并nsys查看效果
 
 ## changelog
+
+### 20260322
+matmul gpu tile版本有逻辑错误，待确认正确方式。
+
 ### 20260321
 matmul cpu朴素 & cpu转置后完成。
 
