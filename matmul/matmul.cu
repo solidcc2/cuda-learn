@@ -11,7 +11,7 @@ void generate_matrix(float* A, int rows, int cols) {
 }
 
 bool nearly_equal(float a, float b, float rtol = 1e-5f, float atol = 1e-8f) {
-    return fabs(a - b) <= rtol + atol * fmax(fabs(a), fabs(b));
+    return fabsf(a - b) <= atol + rtol * fmaxf(fabsf(a), fabsf(b));
 }
 
 namespace transpose {
@@ -128,6 +128,7 @@ namespace matmul {
         float* BT = new float[B_cols * inner];
         transpose::cpu(B, BT, inner, B_cols);
         cpu_v2_trans(A, BT, C, A_rows, B_cols, inner);
+        delete[] BT;
     }
 
     __global__ void _cu_withtrans(float* A, float* BT, float* C, int A_rows, int BT_rows, int cols) {
@@ -135,29 +136,30 @@ namespace matmul {
         int step = min(blockDim.x, blockDim.y);
         float* tile_A = buf;    // step * blockDim.y
         float* tile_BT = tile_A + blockDim.y * step;    // step * blockDim.x
-        unsigned int p_row, p_step;
-        p_row = blockDim.x > blockDim.y ? threadIdx.x : threadIdx.y;
-        p_step = blockDim.x > blockDim.y ? threadIdx.y : threadIdx.x;
-        int tid_x = blockDim.x * blockIdx.x + threadIdx.x;
-        int tid_y = blockDim.y * blockIdx.y + threadIdx.y;
+        int col_id = blockDim.x * blockIdx.x + threadIdx.x;
+        int row_id = blockDim.y * blockIdx.y + threadIdx.y;
         float ret = 0.0f;
         for(int i=0; i<(cols + step - 1)/step; i++){
-            if (p_row < blockDim.y && i*step + p_step < cols && tid_y < A_rows) {
-                tile_A[p_row * step + p_step] = A[tid_y * cols + i*step + p_step];
+            if (threadIdx.x < step && i*step + threadIdx.x < cols && row_id < A_rows) {
+                tile_A[threadIdx.y * step + threadIdx.x] = A[row_id * cols + i*step + threadIdx.x];
+            } else if (threadIdx.x < step) {
+                tile_A[threadIdx.y * step + threadIdx.x] = 0.0f;
             }
-            if (p_row < blockDim.x && i*step + p_step < cols && tid_x < BT_rows) {
-                tile_BT[p_row * step + p_step] = BT[tid_x * cols + i*step + p_step];
+            if (threadIdx.y < step && i*step + threadIdx.y < cols && col_id < BT_rows) {
+                tile_BT[threadIdx.x * step + threadIdx.y] = BT[col_id * cols + i*step + threadIdx.y];
+            } else if (threadIdx.y < step) {
+                tile_BT[threadIdx.x * step + threadIdx.y] = 0.0f;
             }
             __syncthreads();
-            for(int k=i*step; k<cols && k<i*step+step; k++) {
-                if (tid_y < A_rows && tid_x < BT_rows) {
+            if (row_id < A_rows && col_id < BT_rows) {
+                for(int k=i*step; k<cols && k<i*step+step; k++) {
                     ret += tile_A[threadIdx.y * step + k-i*step] * tile_BT[threadIdx.x * step + k-i*step];
                 }
             }
             __syncthreads();
         }
-        if (tid_y < A_rows && tid_x < BT_rows) {
-            C[tid_y * BT_rows + tid_x] = ret;
+        if (row_id < A_rows && col_id < BT_rows) {
+            C[row_id * BT_rows + col_id] = ret;
         }
     }
 
