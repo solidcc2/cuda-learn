@@ -35,6 +35,7 @@ namespace transpose {
         if (x < cols && y < rows) {
             tile[tid] = A[y * cols + x];
         }
+        __syncthreads();
         int o_dim_x = blockDim.y;
         int o_dim_y = blockDim.x;
         int o_tid_x = tid % o_dim_x;
@@ -42,7 +43,7 @@ namespace transpose {
         int o_x = blockIdx.y * blockDim.y + o_tid_x;
         int o_y = blockIdx.x * blockDim.x + o_tid_y;
         if (o_x < rows && o_y < cols) {
-            out[o_y * rows + o_x] = tile[o_tid_x * o_dim_y + o_tid_x];
+            out[o_y * rows + o_x] = tile[o_tid_x * o_dim_y + o_tid_y];
         }
     }
 
@@ -73,6 +74,7 @@ namespace transpose {
         float* A = new float[rows * cols];
         float* out_cpu = new float[rows * cols];
         float* out_gpu = new float[rows * cols];
+        generate_matrix(A, rows, cols);
         cpu(A, out_cpu, rows, cols);
         gpu(A, out_gpu, rows, cols);
         for(int i=0; i<cols; i++){
@@ -112,6 +114,7 @@ namespace matmul {
         auto start = std::chrono::high_resolution_clock::now();
         for(int i=0; i<A_rows; i++) {
             for(int j=0; j<BT_rows; j++) {
+                C[i*BT_rows + j] = 0.0f;
                 for(int k=0; k<cols; k++) {
                     C[i*BT_rows + j] += A[i*cols + k] * BT[j*cols+k];
                 }
@@ -166,7 +169,7 @@ namespace matmul {
         cudaMemcpy(d_A, A, sizeof(float) *A_rows * cols, cudaMemcpyHostToDevice);
         cudaMemcpy(d_BT, BT, sizeof(float) *BT_rows * cols, cudaMemcpyHostToDevice);
         dim3 block(32, 16, 1);
-        dim3 grid((BT_rows+block.x-1)%block.x, (BT_rows+block.x-1)/block.x, 1);
+        dim3 grid((BT_rows+block.x-1)/block.x, (A_rows+block.y-1)/block.y, 1);
         cudaEvent_t start, end;
         cudaEventCreate(&start);
         cudaEventCreate(&end);
