@@ -6,6 +6,7 @@
 
 ### 20260323
 matmul gpu tile版本初步跑通，待进一步优化，以及和标准方式对比。
+flash attention cpu 版本reference就绪。
 
 ### 20260322
 matmul gpu tile版本有逻辑错误，待确认正确方式。
