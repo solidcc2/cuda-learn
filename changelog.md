@@ -4,6 +4,9 @@
 
 ## changelog
 
+### 20260324
+阅读vllm/v1/attention/backends/flash_attn.py, 理解FlashAttentionMetadata，FlashAttentionBackend的用途。后续考虑废弃ai生成版本，重新手写。
+
 ### 20260323
 1. matmul gpu tile版本初步跑通，待进一步优化，以及和标准方式对比。
 2. flash attention cpu 版本reference就绪。
