@@ -4,6 +4,9 @@
 
 ## changelog
 
+### 20260326
+删除ai生成的flash_attn代码。
+
 ### 20260325
 读完vllm/v1/attention/backends/flash_attn.py，了解Flash Attention框架，以及主要优化方式cuda计算图，cascade/prefix公共前缀合并计算，fp8量化scale & descale, sink, GQA DCP等。
 
