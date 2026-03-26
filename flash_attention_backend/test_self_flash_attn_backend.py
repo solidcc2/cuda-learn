@@ -2,8 +2,8 @@ from vllm import LLM, SamplingParams
 from vllm.v1.attention.backends.registry import register_backend, AttentionBackendEnum
 
 register_backend(
-    AttentionBackendEnum.FLASH_ATTN,
-    "flash_attention_backend.MinimalFlashAttentionBackend",
+    AttentionBackendEnum.CUSTOM,
+    "toy_flash_attn.MinimalFlashAttentionBackend",
 )
 
 model_name = "Qwen/Qwen2.5-0.5B-Instruct"
@@ -13,7 +13,7 @@ llm = LLM(
     max_model_len=512,
     gpu_memory_utilization=0.8,
     max_num_seqs=1,
-    attention_backend="FLASH_ATTN",
+    attention_backend="CUSTOM",
 )
 
 prompts = [
