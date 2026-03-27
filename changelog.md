@@ -4,6 +4,9 @@
 
 ## changelog
 
+### 20260327
+1. 完成flash_attn_varlen_func参数含义梳理。
+
 ### 20260326
 1. 删除ai生成的flash_attn代码。
 2. 增加flash attn笔记，增加对特性理解。
