@@ -102,8 +102,21 @@ def _assert_close(
     seq_lens: list[int],
     causal: bool,
     window_size: tuple[int, int] | None,
+    num_heads: int = 2,
+    head_dim: int = 16,
+    dtype: torch.dtype = torch.float16,
+    seed: int = 0,
 ) -> None:
-    q, k, v, cu_seqlens, max_seq_len = _make_inputs(seq_lens)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    q, k, v, cu_seqlens, max_seq_len = _make_inputs(
+        seq_lens=seq_lens,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        dtype=dtype,
+    )
     out_ref = _run_official(
         q=q,
         k=k,
@@ -146,6 +159,45 @@ class FlashAttentionFuncTest(unittest.TestCase):
 
     def test_without_block_matches_fa2_local_window(self) -> None:
         _assert_close(seq_lens=[4, 6], causal=False, window_size=(1, 1))
+
+    def test_without_block_matches_fa2_causal_local_window(self) -> None:
+        _assert_close(seq_lens=[4, 6], causal=True, window_size=(2, 0))
+
+    def test_without_block_matches_fa2_more_varlen_batches(self) -> None:
+        _assert_close(seq_lens=[1, 3, 7, 2], causal=False, window_size=None)
+
+    def test_without_block_matches_fa2_longer_sequences(self) -> None:
+        _assert_close(seq_lens=[8, 11], causal=True, window_size=None)
+
+    def test_without_block_matches_fa2_different_head_shapes(self) -> None:
+        cases = [
+            {"seq_lens": [2, 5], "num_heads": 1, "head_dim": 8},
+            {"seq_lens": [3, 4], "num_heads": 4, "head_dim": 16},
+            {"seq_lens": [2, 6], "num_heads": 2, "head_dim": 32},
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                _assert_close(
+                    seq_lens=case["seq_lens"],
+                    causal=False,
+                    window_size=None,
+                    num_heads=case["num_heads"],
+                    head_dim=case["head_dim"],
+                )
+
+    def test_without_block_matches_fa2_multiple_window_configs(self) -> None:
+        cases = [
+            {"seq_lens": [5, 5], "causal": False, "window_size": (0, 0)},
+            {"seq_lens": [5, 5], "causal": False, "window_size": (2, 1)},
+            {"seq_lens": [5, 5], "causal": True, "window_size": (3, 0)},
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                _assert_close(
+                    seq_lens=case["seq_lens"],
+                    causal=case["causal"],
+                    window_size=case["window_size"],
+                )
 
 
 if __name__ == "__main__":
