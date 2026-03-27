@@ -19,16 +19,17 @@ def flash_attn_varlen_func(
     out: torch.Tensor|None = None,
 ) -> torch.Tensor: 
     '''
-        只考虑decoder, block_table决定是否过cache
+        只考虑decoder, block_table决定是否过cache。
+        q和kv尾对齐
     '''
     if block_table is not None:
-        flash_attn_varlen_with_block(q, k, v, max_seqlen_q, cu_seqlens_q, max_seqlen_k, seqused_k, causal, window_size, block_table, out)
+        return flash_attn_varlen_with_block(q, k, v, max_seqlen_q, cu_seqlens_q, max_seqlen_k, seqused_k, causal, window_size, block_table, out)
     else:
-        flash_attn_varlen_without_block(q, k, v, max_seqlen_q,cu_seqlens_q, max_seqlen_k, cu_seqlens_k, causal, window_size, out)
+        return flash_attn_varlen_without_block(q, k, v, max_seqlen_q,cu_seqlens_q, max_seqlen_k, cu_seqlens_k, causal, window_size, out)
 
 def flash_attn_varlen_with_block(
-    q: torch.Tensor,    # NHD： block_num x block_size x num_head x head_dim
-    k: torch.Tensor,
+    q: torch.Tensor,    # total_q x num_head x head_dim
+    k: torch.Tensor,    # NHD： num_blocks x block_size x num_head x head_dim
     v: torch.Tensor,
     max_seqlen_q: int,
     cu_seqlens_q: List[int],
@@ -41,7 +42,38 @@ def flash_attn_varlen_with_block(
     # return_softmax_lse=False,
     out: torch.Tensor|None = None,
 ) -> torch.Tensor: 
-    pass
+    assert block_table is not None
+    if out is None:
+        out = torch.empty_like(q, device=q.device)
+    for batch_id in range(len(seqused_k)):
+        q_range = (cu_seqlens_q[batch_id], cu_seqlens_q[batch_id+1])
+        kv_len = seqused_k[batch_id]
+        kv_range = (0, kv_len)
+        Q = q[q_range[0]:q_range[1]]
+        block_size = k.shape[1]
+        phy_block_ids = [block_table[batch_id][seq_id//block_size] for seq_id in range(*kv_range)]
+        offset = [seq_id%block_size for seq_id in range(*kv_range)]
+        K = k[phy_block_ids, offset]
+        V = v[phy_block_ids, offset]
+        head_dim = q.shape[2]
+        S = Q.transpose(0, 1).matmul(K.permute(1, 2, 0)) / float(head_dim ** 0.5)
+
+        cur_win = window_size
+        if cur_win is None or cur_win == (-1, -1):
+            cur_win = (kv_len, kv_len)
+        if causal == True:
+            cur_win = (cur_win[0], 0)
+        mask = torch.ones(S.shape[1:], dtype=bool, device=S.device)
+        k_q_offset = K.shape[0] - Q.shape[0]
+        for pos, t in enumerate(mask):
+            w = (max(0, pos+k_q_offset-cur_win[0]), min(kv_len, pos+k_q_offset+1+cur_win[1]))
+            t[w[0]:w[1]] = False
+        S = S.masked_fill(mask, float("-inf"))
+        P = S.softmax(2)
+        o = P.matmul(V.transpose(0, 1)).transpose(0, 1)
+        out[q_range[0]:q_range[1]] = o
+    return out
+        
     
 def flash_attn_varlen_without_block(
     q: torch.Tensor,    # NHD： total_q x num_head x head_dim
@@ -79,8 +111,9 @@ def flash_attn_varlen_without_block(
         if causal == True:
             batch_win = (batch_win[0], 0)
         mask = torch.ones(S.shape[1:], dtype=bool, device=S.device)
+        k_q_offset = K.shape[0] - Q.shape[0]
         for pos, t in enumerate(mask):
-            w = (max(pos - batch_win[0], 0), min(pos + 1 + batch_win[1], kv_len))
+            w = (max(pos + k_q_offset - batch_win[0], 0), min(pos + k_q_offset + 1 + batch_win[1], kv_len))
             t[w[0]:w[1]] = False
         S = S.masked_fill(mask, float("-inf"))
 

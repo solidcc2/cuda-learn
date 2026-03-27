@@ -7,6 +7,9 @@
 ### 20260327
 1. 完成flash_attn_varlen_func参数含义梳理。
 2. 完成ToyFlashAttention的flash_attn_varlen_func_without_block的实现，并让ai生成对拍单测，运行通过。
+3. 完成ToyFlashAttention的flash_attn_varlen_func_with_block的实现，并让ai生成对拍单测，测试通过。
+
+以上测试基准都是vllm.vllm_flash_attn.flash_attn_interface.flash_attn_varlen_func
 
 ### 20260326
 1. 删除ai生成的flash_attn代码。
