@@ -3,6 +3,8 @@
 写一个触发大量bank conflict的代码，并nsys查看效果
 
 ## changelog
+### 20260329
+ai生成了impl和meta实现，backend待接入，未跑通。
 
 ### 20260327
 1. 完成flash_attn_varlen_func参数含义梳理。

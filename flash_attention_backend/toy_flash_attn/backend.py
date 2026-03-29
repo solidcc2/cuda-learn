@@ -5,7 +5,8 @@ from vllm.v1.attention.backend import (
     MultipleOf,
     AttentionType,
     DeviceCapability,
-    CommonAttentionMetadata
+    CommonAttentionMetadata,
+    AttentionMetadata
 ) 
 from vllm.config.cache import CacheDType
 import torch
@@ -92,11 +93,11 @@ class ToyFlashAttentionBackend(AttentionBackend):
     ) -> str | None:
         return "not implement"
     
-class ToyFlashAttentionMetadata:
+class ToyFlashAttentionMetadata(AttentionMetadata):
     num_actual_token: int
     max_query_len: int
 
-class ToyFlashAttentionMetadataBuilder(AttentionMetadataBuilder):
+class ToyFlashAttentionMetadataBuilder(AttentionMetadataBuilder[ToyFlashAttentionMetadata]):
     def build(
         self,
         common_prefix_len: int,
