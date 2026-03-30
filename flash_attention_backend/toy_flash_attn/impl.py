@@ -75,14 +75,13 @@ class ToyFlashAttentionImpl(AttentionImpl["ToyFlashAttentionMetadata"]):
                 return torch.zeros_like(query)
             return output.zero_()
 
-        num_actual_tokens = self._get_num_actual_tokens(attn_metadata)
-        cu_seqlens_q = self._require_tensor(attn_metadata, "query_start_loc")
-        seqused_k = self._require_tensor(attn_metadata, "seq_lens")
-        block_table = self._require_tensor(attn_metadata, "block_table")
-        slot_mapping = self._require_tensor(attn_metadata, "slot_mapping")
-        max_seqlen_q = self._get_max_query_len(attn_metadata)
-        max_seqlen_k = self._get_max_seq_len(attn_metadata, seqused_k)
-        causal = bool(getattr(attn_metadata, "causal", True))
+        num_actual_tokens = attn_metadata.num_actual_tokens
+        cu_seqlens_q = attn_metadata.query_start_loc
+        seqused_k = attn_metadata.seq_lens
+        block_table = attn_metadata.block_table
+        max_seqlen_q = attn_metadata.max_query_len
+        max_seqlen_k = attn_metadata.max_seq_len
+        causal = attn_metadata.causal
 
         assert query.ndim == 3, "query must have shape [num_tokens, num_heads, head_size]"
         assert key.ndim == 3 and value.ndim == 3, "key/value must have shape [num_tokens, num_kv_heads, head_size]"
@@ -96,21 +95,13 @@ class ToyFlashAttentionImpl(AttentionImpl["ToyFlashAttentionMetadata"]):
         assert kv_cache.shape[3] == self.num_kv_heads
         assert kv_cache.shape[4] == self.head_size
         assert cu_seqlens_q.numel() >= 2
-        assert slot_mapping.numel() >= num_actual_tokens
 
         if output is None:
             output = torch.empty_like(query)
         else:
             assert output.shape == query.shape
 
-        key_cache, value_cache = kv_cache.unbind(0)
-        self._update_kv_cache(
-            key[:num_actual_tokens],
-            value[:num_actual_tokens],
-            key_cache,
-            value_cache,
-            slot_mapping[:num_actual_tokens],
-        )
+        key_cache, value_cache = kv_cache[0], kv_cache[1]
 
         flash_attn_varlen_func(
             q=query[:num_actual_tokens],
@@ -128,54 +119,27 @@ class ToyFlashAttentionImpl(AttentionImpl["ToyFlashAttentionMetadata"]):
         )
         return output
 
-    @staticmethod
-    def _require_tensor(attn_metadata: ToyFlashAttentionMetadata, name: str) -> torch.Tensor:
-        value = getattr(attn_metadata, name, None)
-        if value is None:
-            raise ValueError(f"attn_metadata.{name} is required")
-        if not isinstance(value, torch.Tensor):
-            raise TypeError(f"attn_metadata.{name} must be a torch.Tensor")
-        return value
-
-    @staticmethod
-    def _get_num_actual_tokens(attn_metadata: ToyFlashAttentionMetadata) -> int:
-        value = getattr(attn_metadata, "num_actual_tokens", None)
-        if value is None:
-            value = getattr(attn_metadata, "num_actual_token", None)
-        if value is None:
-            raise ValueError("attn_metadata.num_actual_tokens is required")
-        return int(value)
-
-    @staticmethod
-    def _get_max_query_len(attn_metadata: ToyFlashAttentionMetadata) -> int:
-        value = getattr(attn_metadata, "max_query_len", None)
-        if value is None:
-            raise ValueError("attn_metadata.max_query_len is required")
-        return int(value)
-
-    @staticmethod
-    def _get_max_seq_len(
-        attn_metadata: ToyFlashAttentionMetadata,
-        seq_lens: torch.Tensor,
-    ) -> int:
-        value = getattr(attn_metadata, "max_seq_len", None)
-        if value is not None:
-            return int(value)
-        return int(seq_lens.max().item())
-
-    @staticmethod
-    def _update_kv_cache(
+    def do_kv_cache_update(
+        self,
+        layer: torch.nn.Module,
         key: torch.Tensor,
         value: torch.Tensor,
-        key_cache: torch.Tensor,
-        value_cache: torch.Tensor,
+        kv_cache: torch.Tensor,
         slot_mapping: torch.Tensor,
-    ) -> None:
+    ) -> None:      # eager 模式运行，后续可kernel化
+        del layer
+
+        key_cache, value_cache = kv_cache[0], kv_cache[1]
         block_size = key_cache.shape[1]
         slots = slot_mapping.to(device=key.device, dtype=torch.long)
-        if torch.any(slots < 0):
-            raise ValueError("slot_mapping contains negative slots")
-        block_ids = torch.div(slots, block_size, rounding_mode="floor")
-        block_offsets = torch.remainder(slots, block_size)
+        valid_mask = slots >= 0
+        if not torch.any(valid_mask):
+            return
+
+        slots = slots[valid_mask]
+        key = key[valid_mask]
+        value = value[valid_mask]
+        block_ids = slots // block_size
+        block_offsets = slots % block_size
         key_cache[block_ids, block_offsets] = key
         value_cache[block_ids, block_offsets] = value

@@ -17,6 +17,7 @@ from vllm.config.cache import CacheDType
 from .impl import ToyFlashAttentionImpl
 
 class ToyFlashAttentionBackend(AttentionBackend):
+    forward_includes_kv_cache_update = False
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
