@@ -4,7 +4,8 @@
 
 ## changelog
 ### 20260330
-完善backend, 因为GPT需要GQA支持，切换base model为gpt2后已跑通。
+1. 完善backend, 因为GPT需要GQA支持，切换base model为gpt2后已跑通。
+2. cuda算子torch框架接入完成, 增加对拍测试代码。
 
 ### 20260329
 ai生成了impl和meta实现，backend待接入，未跑通。

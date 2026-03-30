@@ -1,4 +1,22 @@
+from __future__ import annotations
+
 import torch
+
+from pathlib import Path
+
+from torch.utils.cpp_extension import load
+
+_THIS_DIR = Path(__file__).resolve().parent
+# compile + load cu
+_ops = load(
+    name="toy_torch_flash_attention_func",
+    sources=[
+        str(_THIS_DIR / "flash_attention_func.cu"),
+    ],
+    extra_cflags=["-O2"],
+    extra_cuda_cflags=["-O2"],
+    verbose=True,
+)
 
 # layout: (2, num_blocks, block_size, num_kv_heads, head_size)
 def flash_attn_varlen_func(
@@ -121,3 +139,30 @@ def flash_attn_varlen_without_block(
         o = o.transpose(0, 1)
         out[token_range[0]:token_range[1]] = o
     return out
+
+
+def flash_attn_varlen_with_block_cu(
+    q: torch.Tensor,    # total_q x num_head x head_dim
+    k: torch.Tensor,    # NHD： num_blocks x block_size x num_head x head_dim
+    v: torch.Tensor,
+    max_seqlen_q: int,
+    cu_seqlens_q: torch.Tensor,
+    max_seqlen_k: int,
+    seqused_k: torch.Tensor,
+    # softmax_scale: int|None=None,
+    causal=False,
+    window_size: tuple[int, int] | None = None,
+    block_table=None,
+    # return_softmax_lse=False,
+    out: torch.Tensor|None = None,
+) -> torch.Tensor:
+    if out is None:
+        out = torch.empty_like(q)
+    if window_size is None:
+        window_size = (-1, -1)
+    return _ops.flash_attn_varlen_with_block(q, k, v, 
+                                    max_seqlen_q, cu_seqlens_q,
+                                    max_seqlen_k, seqused_k,
+                                    causal, window_size[0], window_size[1],
+                                    block_table, 
+                                    out)

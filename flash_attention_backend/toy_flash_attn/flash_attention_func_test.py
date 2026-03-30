@@ -17,6 +17,7 @@ _MOD = module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MOD)
 flash_attn_varlen_without_block = _MOD.flash_attn_varlen_without_block
 flash_attn_varlen_with_block = _MOD.flash_attn_varlen_with_block
+flash_attn_varlen_with_block_cu = _MOD.flash_attn_varlen_with_block_cu
 
 
 def _require_fa2_cuda() -> None:
@@ -209,6 +210,32 @@ def _run_toy_with_block(
     )
 
 
+def _run_toy_with_block_cu(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    seqused_k: torch.Tensor,
+    causal: bool,
+    window_size: tuple[int, int] | None,
+    block_table: torch.Tensor,
+) -> torch.Tensor:
+    return flash_attn_varlen_with_block_cu(
+        q=q,
+        k=k_cache,
+        v=v_cache,
+        max_seqlen_q=max_seqlen_q,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_k=max_seqlen_k,
+        seqused_k=seqused_k,
+        causal=causal,
+        window_size=window_size,
+        block_table=block_table,
+    )
+
+
 def _assert_close(
     q_lens: list[int],
     k_lens: list[int] | None,
@@ -296,6 +323,77 @@ def _assert_close(
     print(f"[PASS] {case_desc}")
 
 
+def _assert_close_with_block_cu(
+    q_lens: list[int],
+    k_lens: list[int] | None,
+    causal: bool,
+    window_size: tuple[int, int] | None,
+    num_heads: int = 2,
+    head_dim: int = 16,
+    dtype: torch.dtype = torch.bfloat16,
+    seed: int = 0,
+) -> None:
+    case_desc = (
+        f"q_lens={q_lens}, k_lens={k_lens}, causal={causal}, "
+        f"window_size={window_size}, num_heads={num_heads}, "
+        f"head_dim={head_dim}, dtype={dtype}, use_block_cu=True"
+    )
+    print(f"[RUN ] {case_desc}")
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
+
+    q, k, v, cu_seqlens_q, _, max_seqlen_q, max_seqlen_k = _make_inputs(
+        q_lens=q_lens,
+        k_lens=k_lens,
+        num_heads=num_heads,
+        head_dim=head_dim,
+        dtype=dtype,
+    )
+    k_cache, v_cache, block_table = _make_block_cache(
+        k_dense=k,
+        v_dense=v,
+        k_lens=k_lens if k_lens is not None else q_lens,
+    )
+    seqused_k = torch.tensor(
+        k_lens if k_lens is not None else q_lens,
+        device=q.device,
+        dtype=torch.int32,
+    )
+
+    out_ref = _run_toy_with_block(
+        q=q,
+        k_cache=k_cache,
+        v_cache=v_cache,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        seqused_k=seqused_k,
+        causal=causal,
+        window_size=window_size,
+        block_table=block_table,
+    )
+    out_cu = _run_toy_with_block_cu(
+        q=q,
+        k_cache=k_cache,
+        v_cache=v_cache,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        seqused_k=seqused_k,
+        causal=causal,
+        window_size=window_size,
+        block_table=block_table,
+    )
+
+    assert out_cu.shape == out_ref.shape
+    assert torch.allclose(out_cu, out_ref, atol=3e-2, rtol=3e-2), (
+        f"Mismatch with q_lens={q_lens}, k_lens={k_lens}, causal={causal}, "
+        f"window_size={window_size}, use_block_cu=True"
+    )
+    print(f"[PASS] {case_desc}")
+
+
 class FlashAttentionFuncTest(unittest.TestCase):
     def setUp(self) -> None:
         _require_fa2_cuda()
@@ -356,6 +454,30 @@ class FlashAttentionFuncTest(unittest.TestCase):
             causal=True,
             window_size=None,
             use_block=True,
+        )
+
+    def test_with_block_cu_matches_python_causal_attention_bf16(self) -> None:
+        _assert_close_with_block_cu(
+            q_lens=[3, 5],
+            k_lens=None,
+            causal=True,
+            window_size=None,
+        )
+
+    def test_with_block_cu_matches_python_full_attention_bf16(self) -> None:
+        _assert_close_with_block_cu(
+            q_lens=[3, 5],
+            k_lens=None,
+            causal=False,
+            window_size=None,
+        )
+
+    def test_with_block_cu_matches_python_tail_aligned_suffix_query_bf16(self) -> None:
+        _assert_close_with_block_cu(
+            q_lens=[2, 3],
+            k_lens=[5, 7],
+            causal=True,
+            window_size=None,
         )
 
     def test_without_block_matches_fa2_different_head_shapes(self) -> None:
