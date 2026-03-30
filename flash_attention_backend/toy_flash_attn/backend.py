@@ -115,6 +115,17 @@ class ToyFlashAttentionMetadataBuilder(AttentionMetadataBuilder[ToyFlashAttentio
         common_attn_metadata: CommonAttentionMetadata,
         fast_build: bool = False,
     ) -> ToyFlashAttentionMetadata:
-        return ToyFlashAttentionMetadata()
+        del common_prefix_len, fast_build
+
+        return ToyFlashAttentionMetadata(
+            num_actual_tokens=common_attn_metadata.num_actual_tokens,
+            max_query_len=common_attn_metadata.max_query_len,
+            query_start_loc=common_attn_metadata.query_start_loc,
+            max_seq_len=common_attn_metadata.max_seq_len,
+            seq_lens=common_attn_metadata.seq_lens,
+            block_table=common_attn_metadata.block_table_tensor,
+            slot_mapping=common_attn_metadata.slot_mapping,
+            causal=common_attn_metadata.causal,
+        )
     
     
