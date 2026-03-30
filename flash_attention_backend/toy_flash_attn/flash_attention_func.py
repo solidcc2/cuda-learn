@@ -1,16 +1,15 @@
 import torch
 
-from typing import List
 # layout: (2, num_blocks, block_size, num_kv_heads, head_size)
 def flash_attn_varlen_func(
     q: torch.Tensor,    # NHD： total_q x num_head x head_dim
     k: torch.Tensor,
     v: torch.Tensor,
     max_seqlen_q: int|None,
-    cu_seqlens_q: List[int]|None,
+    cu_seqlens_q: torch.Tensor,
     max_seqlen_k: int|None,
-    cu_seqlens_k: List[int]|None,  # only used for non-paged prefill
-    seqused_k: List[int]|None = None,
+    cu_seqlens_k: torch.Tensor|None,  # only used for non-paged prefill
+    seqused_k: torch.Tensor|None = None,
     # softmax_scale: int|None=None,
     causal=False,
     window_size: tuple[int, int]  | None = None,
@@ -32,9 +31,9 @@ def flash_attn_varlen_with_block(
     k: torch.Tensor,    # NHD： num_blocks x block_size x num_head x head_dim
     v: torch.Tensor,
     max_seqlen_q: int,
-    cu_seqlens_q: List[int],
+    cu_seqlens_q: torch.Tensor,
     max_seqlen_k: int,
-    seqused_k: List[int],
+    seqused_k: torch.Tensor,
     # softmax_scale: int|None=None,
     causal=False,
     window_size: tuple[int, int] | None = None,
@@ -46,8 +45,8 @@ def flash_attn_varlen_with_block(
     if out is None:
         out = torch.empty_like(q, device=q.device)
     for batch_id in range(len(seqused_k)):
-        q_range = (cu_seqlens_q[batch_id], cu_seqlens_q[batch_id+1])
-        kv_len = seqused_k[batch_id]
+        q_range = (cu_seqlens_q[batch_id].item(), cu_seqlens_q[batch_id+1].item())
+        kv_len = seqused_k[batch_id].item()
         kv_range = (0, kv_len)
         Q = q[q_range[0]:q_range[1]]
         block_size = k.shape[1]
@@ -80,9 +79,9 @@ def flash_attn_varlen_without_block(
     k: torch.Tensor,
     v: torch.Tensor,
     max_seqlen_q: int,
-    cu_seqlens_q: List[int],
+    cu_seqlens_q: torch.Tensor,
     max_seqlen_k: int,
-    cu_seqlens_k: List[int],  # only used for non-paged prefill
+    cu_seqlens_k: torch.Tensor,  # only used for non-paged prefill
     # softmax_scale: int|None=None,
     causal=False,
     window_size: tuple[int, int] | None = None, # 所有batch统一window size
@@ -96,8 +95,8 @@ def flash_attn_varlen_without_block(
         out = torch.empty_like(q, device=q.device)
 
     for batch_id in range(len(cu_seqlens_q)-1):
-        token_range = (cu_seqlens_q[batch_id], cu_seqlens_q[batch_id+1])
-        kv_range = (cu_seqlens_k[batch_id], cu_seqlens_k[batch_id+1])
+        token_range = (cu_seqlens_q[batch_id].item(), cu_seqlens_q[batch_id+1].item())
+        kv_range = (cu_seqlens_k[batch_id].item(), cu_seqlens_k[batch_id+1].item())
         # Q @ K^T / sqrt(d)
         K = k[kv_range[0]:kv_range[1]]
         V = v[kv_range[0]:kv_range[1]]
