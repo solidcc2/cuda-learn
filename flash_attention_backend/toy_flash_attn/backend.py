@@ -8,16 +8,18 @@ from vllm.v1.attention.backend import (
     AttentionMetadataBuilder,
     MultipleOf,
     AttentionType,
-    DeviceCapability,
     CommonAttentionMetadata,
     AttentionMetadata,
 )
+from vllm.platforms.interface import DeviceCapability
+
 from vllm.config.cache import CacheDType
 
 from .impl import ToyFlashAttentionImpl
 
 class ToyFlashAttentionBackend(AttentionBackend):
     forward_includes_kv_cache_update = False
+    accept_output_buffer = True
 
     @staticmethod
     def get_supported_kernel_block_sizes() -> list[int | MultipleOf]:
@@ -96,7 +98,9 @@ class ToyFlashAttentionBackend(AttentionBackend):
         use_sparse: bool,
         device_capability: "DeviceCapability",
     ) -> str | None:
-        return "not implement"
+        if has_sink or use_sparse or use_mla:
+            return "not implement"
+        return None
     
 @dataclass
 class ToyFlashAttentionMetadata(AttentionMetadata):
@@ -110,6 +114,9 @@ class ToyFlashAttentionMetadata(AttentionMetadata):
     causal: bool = True
 
 class ToyFlashAttentionMetadataBuilder(AttentionMetadataBuilder[ToyFlashAttentionMetadata]):
+    def __init__(self, kv_cache_spec, layer_names, vllm_config, device: torch.device):
+        super().__init__(kv_cache_spec, layer_names, vllm_config, device)
+
     def build(
         self,
         common_prefix_len: int,

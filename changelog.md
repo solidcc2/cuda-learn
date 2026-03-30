@@ -3,6 +3,9 @@
 写一个触发大量bank conflict的代码，并nsys查看效果
 
 ## changelog
+### 20260330
+完善backend, 因为GPT需要GQA支持，切换base model为gpt2后已跑通。
+
 ### 20260329
 ai生成了impl和meta实现，backend待接入，未跑通。
 

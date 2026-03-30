@@ -3,10 +3,11 @@ from vllm.v1.attention.backends.registry import register_backend, AttentionBacke
 
 register_backend(
     AttentionBackendEnum.CUSTOM,
-    "toy_flash_attn.MinimalFlashAttentionBackend",
+    "toy_flash_attn.ToyFlashAttentionBackend",
 )
 
-model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+# model_name = "Qwen/Qwen2.5-0.5B-Instruct"
+model_name = "gpt2"
 
 llm = LLM(
     model=model_name,
@@ -14,6 +15,7 @@ llm = LLM(
     gpu_memory_utilization=0.8,
     max_num_seqs=1,
     attention_backend="CUSTOM",
+    kv_cache_dtype="bfloat16"
 )
 
 prompts = [

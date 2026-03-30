@@ -21,7 +21,7 @@ class ToyFlashAttentionImpl(AttentionImpl["ToyFlashAttentionMetadata"]):
         num_kv_heads: int | None = None,
         alibi_slopes: list[float] | None = None,
         sliding_window: int | None = None,
-        kv_cache_dtype: str = "auto",
+        kv_cache_dtype: str = "bfloat16",
         logits_soft_cap: float | None = None,
         attn_type: str = AttentionType.DECODER,
         kv_sharing_target_layer_name: str | None = None,
@@ -39,7 +39,7 @@ class ToyFlashAttentionImpl(AttentionImpl["ToyFlashAttentionMetadata"]):
             raise NotImplementedError("logits_soft_cap is not supported")
         if kv_sharing_target_layer_name is not None:
             raise NotImplementedError("KV sharing is not supported")
-        if kv_cache_dtype not in ("auto", "bfloat16"):
+        if kv_cache_dtype not in ("bfloat16"):
             raise NotImplementedError(f"Unsupported kv_cache_dtype: {kv_cache_dtype}")
 
         self.num_heads = num_heads
