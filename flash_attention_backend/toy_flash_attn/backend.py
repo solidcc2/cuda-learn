@@ -1,3 +1,7 @@
+from dataclasses import dataclass
+
+import torch
+
 from vllm.v1.attention.backend import (
     AttentionBackend,
     AttentionImplBase,
@@ -6,10 +10,10 @@ from vllm.v1.attention.backend import (
     AttentionType,
     DeviceCapability,
     CommonAttentionMetadata,
-    AttentionMetadata
-) 
+    AttentionMetadata,
+)
 from vllm.config.cache import CacheDType
-import torch
+
 from .impl import ToyFlashAttentionImpl
 
 class ToyFlashAttentionBackend(AttentionBackend):
@@ -93,9 +97,16 @@ class ToyFlashAttentionBackend(AttentionBackend):
     ) -> str | None:
         return "not implement"
     
+@dataclass
 class ToyFlashAttentionMetadata(AttentionMetadata):
-    num_actual_token: int
+    num_actual_tokens: int
     max_query_len: int
+    query_start_loc: torch.Tensor
+    max_seq_len: int
+    seq_lens: torch.Tensor
+    block_table: torch.Tensor
+    slot_mapping: torch.Tensor
+    causal: bool = True
 
 class ToyFlashAttentionMetadataBuilder(AttentionMetadataBuilder[ToyFlashAttentionMetadata]):
     def build(
