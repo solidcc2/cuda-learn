@@ -3,6 +3,9 @@
 写一个触发大量bank conflict的代码，并nsys查看效果
 
 ## changelog
+### 20260331
+cuda attention kernel 完成框架，内部matmul & online softmax初步雏形， 还缺少地址转换，最后一步P @ V 以及TILE间sum & m归约。
+
 ### 20260330
 1. 完善backend, 因为GPT需要GQA支持，切换base model为gpt2后已跑通。
 2. cuda算子torch框架接入完成, 增加对拍测试代码。

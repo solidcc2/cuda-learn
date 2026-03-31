@@ -25,6 +25,8 @@ void check_inputs(
 
 #define TILE_ROW 32
 #define TILE_COL 32
+#define BLOCK_ROW 32
+#define BLOCK_COL 32
 
 // 单个batch
 template<typename scalar_t>
@@ -47,22 +49,87 @@ __global__ void flash_attn_varlen_with_block_kernel(
     int64_t num_kv_heads,
     int64_t head_dim,
     int64_t block_size,
-    int64_t batch_size,
     scalar_t* out
 ) {
-    extern __shared__ scalar_t* tile; 
-    int64_t tid = blockIdx.x * blockDim.x + threadIdx.x;
-    scalar_t scale = sqrt(head_dim);
-    for(int batch_id = 0; batch_id<batch_size; batch_id++) {
-        // Q.transpose(0, 1).matmul(K.permute(1, 2, 0)) / scale
-        q_range_l = cu_seqlens_q[batch_id];
-        q_range_r = cu_seqlens_q[batch_id+1];
-        kv_len = seqused_k[batch_id];
+    extern __shared__ scalar_t tile[];   // 2 x TILE_ROW x TILE_COL
+    scalar_t* tile_A = tile; // BLOCK_ROW x BLOCK_COL
+    scalar_t* tile_BT = tile + blockDim.y * blockDim.x; // BLOCK_ROW x BLOCK_COL
+    int64_t batch_id = blockIdx.z / num_heads;
+    int64_t head_id = blockIdx.z % num_heads;
+    int64_t q_seqlen = cu_seqlens_q[batch_id+1] - cu_seqlens_q[batch_id];
+    int64_t kv_seqlen = seqused_k[batch_id];
+    int64_t row_id = blockDim.y * blockIdx.y + threadIdx.y;
+    int64_t col_id = blockDim.x * blockIdx.x + threadIdx.x;
+    scalar_t result = 0.0f;
+    for(int chunk_id=0; chunk_id<(head_dim + TILE_COL - 1)/TILE_COL; chunk_id++) {
+        if (row_id < q_seqlen && col_id < head_dim && threadIdx.x < TILE_COL) {
+            tile_A[threadIdx.y * TILE_COL + threadIdx.x] = 0.0f; // TODO: address translate
+        } else {
+            tile_A[threadIdx.y * TILE_COL + threadIdx.x] = 0.0f;
+        }
+        if (col_id < kv_seqlen && row_id < head_dim && threadIdx.x < TILE_COL) {  // 
+            tile_BT[threadIdx.x *TILE_COL + threadIdx.y] = 0.0f; // TODO
+        } else {
+            tile_BT[threadIdx.x *TILE_COL + threadIdx.y] = 0.0f;
+        }
+        __syncthreads();
+        if (row_id < q_seqlen && col_id < kv_seqlen) {
+            for(i=0; i<TILE_COL; i++) {
+                result += tile_A[threadIdx.y * TILE_COL + i] * tile_BT[threadIdx.x * TILE_COL + i];
+            }
         
-        
-
-        // mask window 
+        }
+        __syncthreads();
     }
+    result /= sqrt(head_dim);
+
+    // 到这里不是所有的block都运算了
+
+    // 沿着 x 方向做softmax
+    scalar_t* softmax_tile = tile;   // TILE_ROW x TILE_COL
+ 
+    softmax_tile[threadIdx.y * TILE_COL + threadIdx.x] = 
+        (row_id < q_seqlen && col_id < kv_seqlen) ? result : -INFINITY;
+    __syncthreads();
+    scalar_t m = softmax_tile[threadIdx.y * TILE_COL + threadIdx.x];
+    scalar_t sum = 1.0f;
+    
+    for(int bound = blockDim.x/2; bound >=warpSize; bound/=2) {
+        if (threadIdx.x < bound) {
+            scalar_t neighbor = softmax_tile[threadIdx.y * TILE_COL + threadIdx.x + bound];
+            scaler_t new_m = max(m, neighbor);
+            sum = sum * __expf(m-new_m) + __expf(neighbor-new_m);
+            m = new_m;
+        }
+    }
+    scalar_t var = softmax_tile[threadIdx.y * TILE_COL + threadIdx.x];
+    if (threadIdx.x < warpSize) {
+        scalar_t neighbor = __shfl_down_sync(0xffffffff, var, 16);
+        scaler_t new_m = max(m, neighbor);
+        sum = sum * __expf(m-new_m) + __expf(neighbor-new_m);
+        m = new_m;
+
+        neighbor = __shfl_down_sync(0xffffffff, var, 8);
+        scaler_t new_m = max(m, neighbor);
+        sum = sum * __expf(m-new_m) + __expf(neighbor-new_m);
+        m = new_m;
+
+        neighbor = __shfl_down_sync(0xffffffff, var, 4);
+        scaler_t new_m = max(m, neighbor);
+        sum = sum * __expf(m-new_m) + __expf(neighbor-new_m);
+        m = new_m;
+
+        neighbor = __shfl_down_sync(0xffffffff, var, 2);
+        scaler_t new_m = max(m, neighbor);
+        sum = sum * __expf(m-new_m) + __expf(neighbor-new_m);
+        m = new_m;
+
+        neighbor = __shfl_down_sync(0xffffffff, var, 1);
+        scaler_t new_m = max(m, neighbor);
+        sum = sum * __expf(m-new_m) + __expf(neighbor-new_m);
+        m = new_m;
+    }
+    tile_A[threadIdx.y * TILE_COL + threadIdx.x] = __expf(var - m) / sum;
 }
 
 torch::Tensor flash_attn_varlen_with_block(
@@ -86,9 +153,13 @@ torch::Tensor flash_attn_varlen_with_block(
         window_size_left, window_size_right,
         block_table, 
         out);
-    dim3 block(3);  // TODO
-    dim3 grid(4);   // TODO
-    flash_attn_varlen_with_block_kernel<at::BFloat16><<<grid, block>>>(
+    dim3 block(BLOCK_COL, BLOCK_ROW);
+    auto batch_size = seqused_k.size(0);
+    auto num_heads = q.size(1);
+    dim3 grid((max_seqlen_k + BLOCK_COL - 1)/BLOCK_COL,
+                (max_seqlen_q + BLOCK_ROW - 1)/BLOCK_ROW, 
+                batch_size * num_heads);
+    flash_attn_varlen_with_block_kernel<at::BFloat16><<<grid, block, 2 * sizeof(at::BFloat16) * TILE_COL * TILE_ROW>>>(
         q.const_data_ptr<at::BFloat16>(),
         q.strides(),
         k.const_data_ptr<at::BFloat16>(),
@@ -106,7 +177,6 @@ torch::Tensor flash_attn_varlen_with_block(
         k.size(2),
         q.size(2),
         k.size(1),
-        seqused_k.size(0),
         out.data_ptr<at::BFloat16>()
     );
     C10_CUDA_KERNEL_LAUNCH_CHECK();
