@@ -28,7 +28,7 @@ void check_inputs(
 #define BLOCK_ROW 32
 #define BLOCK_COL 32
 
-// 单个batch
+// deprecated
 template<typename scalar_t>
 __global__ void flash_attn_varlen_with_block_kernel(
     const scalar_t* q,  // total_q x num_heads x head_dim

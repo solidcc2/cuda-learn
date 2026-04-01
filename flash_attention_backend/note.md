@@ -264,3 +264,16 @@ context parallel/DCP的world size。多卡上下文并行时使用
 
 CP/DCP场景下，总体有效key长度相关信息。用于多卡上下文分片时的长度计算。
 
+# 优化关注事项
+
+## 临时变量过多导致溢出到local memory & L1/L2 cache,性能差
+
+判断方式, 检查是否有明显spill
+
+```
+nvcc --ptxas-options=-v ...
+
+Used XX registers
+spill stores
+spill loads
+```

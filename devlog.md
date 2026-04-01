@@ -4,7 +4,8 @@
 
 ## Dev Log
 ### 20260401
-完成q & k转换，tile gather
+1. 完成q & k转换，tile gather。
+2. 确认当前版本的block划分维度，在架构层面存在阻塞。当前是以QK^T的输出矩阵维度划分的tile, 不利于online softmax实现，导致需要block间归约，滑动窗口也不便于提前到QK^T前进行和tile内。准备弃用当前实现，重构。
 
 ### 20260331
 cuda attention kernel 完成框架，内部matmul & online softmax初步雏形， 还缺少地址转换，最后一步P @ V 以及TILE间sum & m归约。
