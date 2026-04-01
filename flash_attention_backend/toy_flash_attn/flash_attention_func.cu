@@ -98,7 +98,6 @@ __global__ void flash_attn_varlen_with_block_kernel(
                     k_stride2 * head_id + 
                     k_stride3 * (chunk_id*TILE_COL+threadIdx.y)
                 ];
-
         } else {
             tile_BT[threadIdx.x *TILE_COL + threadIdx.y] = 0.0f;
         }
@@ -112,8 +111,6 @@ __global__ void flash_attn_varlen_with_block_kernel(
         __syncthreads();
     }
     result /= sqrt(head_dim);
-
-    // 到这里不是所有的block都运算了
 
     // 沿着 x 方向做softmax
     scalar_t* softmax_tile = tile;   // TILE_ROW x TILE_COL
