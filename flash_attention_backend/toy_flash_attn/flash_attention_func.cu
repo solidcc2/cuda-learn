@@ -391,29 +391,30 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
             __expf(val - tile_softmax_m[threadIdx.y * blockDim.x + 0]) / tile_softmax_sum[threadIdx.y * blockDim.x + 0];
     }
    
+    // matmul for softmax @ V
+    scalar_t* tile_VT;  // 空间分配 head_dim x window_size_block
     
-    //matmul for softmax @ V
-    // scalar_t* tile_VT = tile_Q;
-    // for (int64_t chunk_id = 0; chunk_id < (absolute_range_right - absolute_range_left + blockDim.y - 1) / blockDim.y; chunk_id++ ) {
-    //     int64_t virt_seq_id = absolute_range_left + chunk_id * blockDim.y + threadIdx.y;
-    //     if (virt_seq_id < absolute_range_left) {
-    //         int64_t phy_block_id = block_table[
-    //             bt_stride0 * batch_id + 
-    //             bt_stride1 * (virt_seq_id / block_size)
-    //         ];
-    //         tile_VT[threadIdx.y * blockDim.x + threadIdx.x] = v [
-    //             v_stride0 * phy_block_id +
-    //             v_stride1 * (virt_seq_id % block_size) +    // offset
-    //             v_stride2 * head_id +
-    //             v_stride3 * threadIdx.x
-    //         ];
-    //     } else {
-    //         tile_VT[threadIdx.y * blockDim.x + threadIdx.x] = 0.0;
-    //     }
-    //     for(int v_tile_row_id = 0; v_tile_row_id < blockDim.y; v_tile_row_id ++) {
 
-    //     }
-    // }
+    for(int i=threadIdx.y; i < window_size; i+= blockDim.y) {
+        tile_VT[threadIdx.x * window_size + i] = 0.0 // clear
+    }
+    for(int i=threadIdx.y; i < (absolute_range_right - absolute_range_left); i+=blockDim.y) {
+        int64_t virt_seq_id = absolute_range_left + i;
+        int64_t phy_block_id = block_table[
+            bt_stride0 * batch_id +
+            bt_stride1 * (virt_seq_id / block_size)
+        ];
+        if (threadIdx.x < head_dim) {
+            tile_VT[threadIdx.x * window_size + i] = v [
+                v_stride0 * phy_block_id +
+                v_stride1 * (virt_seq_id % block_size) +
+                v_stride2 * head_id +
+                v_stride3 * threadIdx.x
+            ];
+        } else {
+            tile_VT[threadIdx.x * window_size + i] = 0.0;
+        }
+    }
 
 }
 
