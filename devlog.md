@@ -3,6 +3,9 @@
 写一个触发大量bank conflict的代码，并nsys查看效果
 
 ## Dev Log
+### 20260402
+梳理Q @ K^T和softmax部分逻辑错误，跑通进度60%
+
 ### 20260401
 1. 完成q & k转换，tile gather。
 2. 确认当前版本的block划分维度，在架构层面存在阻塞。当前是以QK^T的输出矩阵维度划分的tile, 不利于online softmax实现，导致需要block间归约，滑动窗口也不便于提前到QK^T前进行和tile内。准备弃用当前实现，重构。

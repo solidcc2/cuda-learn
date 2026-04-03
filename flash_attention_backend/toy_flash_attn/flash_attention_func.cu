@@ -264,7 +264,7 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
     int64_t head_id = blockIdx.z % num_heads;
     int64_t q_token_id = threadIdx.y + blockIdx.y * blockDim.y;
     int64_t q_seqlen = cu_seqlens_q[batch_id+1] - cu_seqlens_q[batch_id];
-    int64_t kv_seqlen = seqlens_k[batch_id];
+    int64_t kv_seqlen = seqused_k[batch_id];
     
     // gather tile_Q
     if (q_token_id < q_seqlen && threadIdx.x < head_dim) {
@@ -277,37 +277,39 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
         tile_Q[threadIdx.y * head_dim + threadIdx.x] = 0.0;
     }
     // window size 边界调整
-    int64_t history_offset = q_seqlen - q_token_id; // history offset
+    int64_t history_offset = q_seqlen - 1 - q_token_id; // history offset
     // [absolute_range_left, absolute_range_right)
-    int64_t absolute_range_right = min(kv_seqlen-1, kv_seqlen - history_offset + window_size_right + 1); // 开区间
-    int64_t absolute_range_left = max(0, kv_seqlen - history_offset - window_size_left);
+    int64_t absolute_range_right = min(kv_seqlen, kv_seqlen - history_offset + window_size_right); // 开区间
+    int64_t absolute_range_left = max(0, kv_seqlen - 1 - history_offset - window_size_left);
     for (int chunk_id = 0; chunk_id < (absolute_range_right - absolute_range_left + blockDim.y - 1) / blockDim.y; chunk_id++) {
         int64_t virt_kv_token_id = absolute_range_left + chunk_id * blockDim.y + threadIdx.y;
         int64_t phy_block_id = block_table[
-            bt_stride0 * batch_id,
+            bt_stride0 * batch_id + 
             bt_stride1 * (virt_kv_token_id / block_size) // virt block id
-        ]
+        ];
         if (virt_kv_token_id < kv_seqlen && threadIdx.x < head_dim) {
-            tile_KT[threadidx.y * head_dim + threadIdx.x] = k[
-                q_stride0 * phy_block_id +
-                q_stride1 * (virt_kv_token_id % block_size) +
-                q_stride2 * head_id +
-                q_stride3 * threadIdx.x
-            ]
+            tile_KT[threadIdx.y * head_dim + threadIdx.x] = k[
+                k_stride0 * phy_block_id +
+                k_stride1 * (virt_kv_token_id % block_size) +
+                k_stride2 * head_id +
+                k_stride3 * threadIdx.x
+            ];
         } else {
-            tile_KT[threadidx.y * head_dim + threadIdx.x] = 0.0;
+            tile_KT[threadIdx.y * head_dim + threadIdx.x] = 0.0;
         }
         __syncthreads();
 
         // tile matmul
         for(int b_tile_row_id = 0; b_tile_row_id < blockDim.y; b_tile_row_id ++) {
-            scalar_t result = tile_Q[threadIdx.y * head_dim + threadIdx.x] * tile_BT[b_tile_row_id * head_dim + threadIdx.x];
-            tile_BT[b_tile_row_id * head_dim + threadIdx.x] = result;
+            scalar_t result = tile_Q[threadIdx.y * head_dim + threadIdx.x] * tile_KT[b_tile_row_id * head_dim + threadIdx.x];
+            tile_KT[b_tile_row_id * head_dim + threadIdx.x] = result;
             __syncthreads();
             for(int bound = blockDim.x / 2; bound >= warpSize; bound /= 2) {
-                if (threadIdx. x < bound) {
-                    result += tile_BT[b_tile_row_id * head_dim + threadIdx.x];
+                if (threadIdx.x < bound) {
+                    result += tile_KT[b_tile_row_id * head_dim + threadIdx.x + bound];
+                    tile_KT[b_tile_row_id * head_dim + threadIdx.x] = result;
                 }
+                __syncthreads();
             }
             if (threadIdx.x < warpSize) {
                 result += __shfl_down_sync(0xffffffff, result, 16);
@@ -324,62 +326,94 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
             }
         }
         __syncthreads();
-
-        // online softmax
-        scalar_t m = tile_softmax[threadIdx.y * window_size + threadIdx.x];
-        scalar_t sum = 1.0;
-        for(int i = threadIdx.x; i < window_size / blockDim.x; i += blockDim.x) {
-            scalar_t val = tile_softmax[threadIdx.y * window_size + i];
-            scalar_t new_m = max(val, m);
-            sum = sum * __expf(m - new_m) + __expf(val - new_m);
-            m = new_m;
-        }
-        tile_softmax_m[threadIdx.y * blockDim.x + threadIdx.x] = m;
-        tile_softmax_sum[threadIdx.y * blockDim.x + threadIdx.x] = sum;
-        __syncthreads();
-        
-        for(int bound < blockDim.x / 2; bound >= warpSize; bound /= 2) {
-            if (threadIdx.x < bound) {
-                scalar_t neighbor_m = tile_softmax_m[threadIdx.y * blockDim.x + threadIdx.x + bound];
-                scalar_t neighbor_sum = tile_softmax_sum[threadIdx.y * blockDim.x + threadIdx.x + bound];
-                scalar_t new_m = max(m, neighbor_m);
-                sum = sum * __expf(m - new_m) + neighbor_sum * __expf(neighbor_m - new_m); 
-                m = new_m;
-            }
-        }
-        if (threadIdx.x < warpSize) {
-            scalar_t neighbor_m = __shfl_down_sync(0xffffffff, m, 16);
-            scalar_t neighbor_sum = __shfl_down_sync(0xffffffff, sum, 16);
+    }
+    // online softmax
+    scalar_t m = threadIdx.x < window_size ? tile_softmax[threadIdx.y * window_size + threadIdx.x] : -INFINITY;
+    scalar_t sum = 1.0;
+    for(int i = threadIdx.x; i < window_size; i += blockDim.x) {
+        scalar_t val = tile_softmax[threadIdx.y * window_size + i];
+        scalar_t new_m = max(val, m);
+        sum = sum * __expf(m - new_m) + __expf(val - new_m);
+        m = new_m;
+    }
+    tile_softmax_m[threadIdx.y * blockDim.x + threadIdx.x] = m;
+    tile_softmax_sum[threadIdx.y * blockDim.x + threadIdx.x] = sum;
+    __syncthreads();
+    
+    for(int bound = blockDim.x / 2; bound >= warpSize; bound /= 2) {
+        if (threadIdx.x < bound) {
+            scalar_t neighbor_m = tile_softmax_m[threadIdx.y * blockDim.x + threadIdx.x + bound];
+            scalar_t neighbor_sum = tile_softmax_sum[threadIdx.y * blockDim.x + threadIdx.x + bound];
             scalar_t new_m = max(m, neighbor_m);
-            sum = sum * __expf(m - new_m) + neighbor_sum * __expf(neighbor_m - new_m); 
-            m = new_m;
-
-            neighbor_m = __shfl_down_sync(0xffffffff, m, 8);
-            neighbor_sum = __shfl_down_sync(0xffffffff, sum, 8);
-            new_m = max(m, neighbor_m);
-            sum = sum * __expf(m - new_m) + neighbor_sum * __expf(neighbor_m - new_m); 
-            m = new_m;
-
-            neighbor_m = __shfl_down_sync(0xffffffff, m, 4);
-            neighbor_sum = __shfl_down_sync(0xffffffff, sum, 4);
-            new_m = max(m, neighbor_m);
-            sum = sum * __expf(m - new_m) + neighbor_sum * __expf(neighbor_m - new_m); 
-            m = new_m;
-
-            neighbor_m = __shfl_down_sync(0xffffffff, m, 2);
-            neighbor_sum = __shfl_down_sync(0xffffffff, sum, 2);
-            new_m = max(m, neighbor_m);
-            sum = sum * __expf(m - new_m) + neighbor_sum * __expf(neighbor_m - new_m); 
-            m = new_m;
-
-            neighbor_m = __shfl_down_sync(0xffffffff, m, 1);
-            neighbor_sum = __shfl_down_sync(0xffffffff, sum, 1);
-            new_m = max(m, neighbor_m);
             sum = sum * __expf(m - new_m) + neighbor_sum * __expf(neighbor_m - new_m); 
             m = new_m;
         }
     }
+    if (threadIdx.x < warpSize) {
+        scalar_t neighbor_m = __shfl_down_sync(0xffffffff, m, 16);
+        scalar_t neighbor_sum = __shfl_down_sync(0xffffffff, sum, 16);
+        scalar_t new_m = max(m, neighbor_m);
+        sum = sum * __expf(m - new_m) + neighbor_sum * __expf(neighbor_m - new_m); 
+        m = new_m;
+
+        neighbor_m = __shfl_down_sync(0xffffffff, m, 8);
+        neighbor_sum = __shfl_down_sync(0xffffffff, sum, 8);
+        new_m = max(m, neighbor_m);
+        sum = sum * __expf(m - new_m) + neighbor_sum * __expf(neighbor_m - new_m); 
+        m = new_m;
+
+        neighbor_m = __shfl_down_sync(0xffffffff, m, 4);
+        neighbor_sum = __shfl_down_sync(0xffffffff, sum, 4);
+        new_m = max(m, neighbor_m);
+        sum = sum * __expf(m - new_m) + neighbor_sum * __expf(neighbor_m - new_m); 
+        m = new_m;
+
+        neighbor_m = __shfl_down_sync(0xffffffff, m, 2);
+        neighbor_sum = __shfl_down_sync(0xffffffff, sum, 2);
+        new_m = max(m, neighbor_m);
+        sum = sum * __expf(m - new_m) + neighbor_sum * __expf(neighbor_m - new_m); 
+        m = new_m;
+
+        neighbor_m = __shfl_down_sync(0xffffffff, m, 1);
+        neighbor_sum = __shfl_down_sync(0xffffffff, sum, 1);
+        new_m = max(m, neighbor_m);
+        sum = sum * __expf(m - new_m) + neighbor_sum * __expf(neighbor_m - new_m); 
+        m = new_m;
+    }
+    if (threadIdx.x == 0) {
+        tile_softmax_m[threadIdx.y * blockDim.x + threadIdx.x] = m;
+        tile_softmax_sum[threadIdx.y * blockDim.x + threadIdx.x] = sum;
+    }
+    __syncthreads();
+    for(int i=0; i<window_size; i+=blockDim.x) {
+        scalar_t val = tile_softmax[threadIdx.y * blockDim.x + i];
+        tile_softmax[threadIdx.y * window_size + i] = 
+            __expf(val - tile_softmax_m[threadIdx.y * blockDim.x + 0]) / tile_softmax_sum[threadIdx.y * blockDim.x + 0];
+    }
+   
     
+    //matmul for softmax @ V
+    // scalar_t* tile_VT = tile_Q;
+    // for (int64_t chunk_id = 0; chunk_id < (absolute_range_right - absolute_range_left + blockDim.y - 1) / blockDim.y; chunk_id++ ) {
+    //     int64_t virt_seq_id = absolute_range_left + chunk_id * blockDim.y + threadIdx.y;
+    //     if (virt_seq_id < absolute_range_left) {
+    //         int64_t phy_block_id = block_table[
+    //             bt_stride0 * batch_id + 
+    //             bt_stride1 * (virt_seq_id / block_size)
+    //         ];
+    //         tile_VT[threadIdx.y * blockDim.x + threadIdx.x] = v [
+    //             v_stride0 * phy_block_id +
+    //             v_stride1 * (virt_seq_id % block_size) +    // offset
+    //             v_stride2 * head_id +
+    //             v_stride3 * threadIdx.x
+    //         ];
+    //     } else {
+    //         tile_VT[threadIdx.y * blockDim.x + threadIdx.x] = 0.0;
+    //     }
+    //     for(int v_tile_row_id = 0; v_tile_row_id < blockDim.y; v_tile_row_id ++) {
+
+    //     }
+    // }
 
 }
 
@@ -416,8 +450,13 @@ torch::Tensor flash_attn_varlen_with_block_v2(
             (max_seqlen_q + block_row - 1)/ block_row, 
             batch_size * num_heads
         );
+    int tile_size = block.y * head_dim +
+                    block.y * head_dim + 
+                    block.y * (window_size_right - window_size_left) + 
+                    block.x * block.y + 
+                    block.x * block.y;
 
-    flash_attn_varlen_with_block_kernel<at::BFloat16><<<grid, block, 2 * sizeof(at::BFloat16) * head_dim * block_row>>>(
+    flash_attn_varlen_with_block_kernel_v2<at::BFloat16><<<grid, block, sizeof(at::BFloat16) * tile_size>>>(
         q.const_data_ptr<at::BFloat16>(),
         q.stride(0), q.stride(1), q.stride(2),
         k.const_data_ptr<at::BFloat16>(),
