@@ -3,6 +3,9 @@
 写一个触发大量bank conflict的代码，并nsys查看效果
 
 ## Dev Log
+### 20260403
+完成一版本单kernel的flash attention代码开发。有bug,待调试排查。
+
 ### 20260402
 梳理Q @ K^T和softmax部分逻辑错误，跑通进度60%
 
