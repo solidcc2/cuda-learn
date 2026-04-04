@@ -258,22 +258,34 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
     const int window_chunk_size = kv_seq_chunk_size;
     const int tmp_softmax_chunk_size = window_chunk_size/2;
 
-    scalar_t* tile_Q;   // q_seq_chunk_size x head_dim
-    scalar_t* tile_K;  // kv_seq_chunk_size x head_dim
-    scalar_t* tile_softmax;     // q_seq_chunk_size x kv_seq_chunk_size
-    scalar_t* tile_softmax_m;   // q_seq_chunk_size x tmp_softmax_chunk_size
-    scalar_t* tile_softmax_sum; // q_seq_chunk_size x tmp_softmax_chunk_size
-    scalar_t* tile_VT;   // head_dim x kv_seq_chunk_size
-    scalar_t* tile_out; // q_seq_chunk_size x head_dim
-    scalar_t* old_softmax_m;    // q_seq_chunk_size x 1
-    scalar_t* old_softmax_sum;  // q_seq_chunk_size x 1
+    // scalar_t* tile_Q;   // q_seq_chunk_size x head_dim
+    // scalar_t* tile_K;  // kv_seq_chunk_size x head_dim
+    // scalar_t* tile_softmax;     // q_seq_chunk_size x kv_seq_chunk_size
+    // scalar_t* tile_softmax_m;   // q_seq_chunk_size x tmp_softmax_chunk_size
+    // scalar_t* tile_softmax_sum; // q_seq_chunk_size x tmp_softmax_chunk_size
+    // scalar_t* tile_VT;   // head_dim x kv_seq_chunk_size
+    // scalar_t* tile_out; // q_seq_chunk_size x head_dim
+    // scalar_t* old_softmax_m;    // q_seq_chunk_size x 1
+    // scalar_t* old_softmax_sum;  // q_seq_chunk_size x 1
+
+    scalar_t* tile_Q = tile;   // q_seq_chunk_size x head_dim
+    scalar_t* tile_K = tile_Q + q_seq_chunk_size * head_dim;  // kv_seq_chunk_size x head_dim
+    scalar_t* tile_softmax = tile_K + kv_seq_chunk_size * head_dim;     // q_seq_chunk_size x kv_seq_chunk_size
+    scalar_t* tile_softmax_m = tile_softmax + q_seq_chunk_size * kv_seq_chunk_size;   // q_seq_chunk_size x tmp_softmax_chunk_size
+    scalar_t* tile_softmax_sum = tile_softmax_m + q_seq_chunk_size * tmp_softmax_chunk_size; // q_seq_chunk_size x tmp_softmax_chunk_size
+    scalar_t* tile_VT = tile_softmax_sum + q_seq_chunk_size * tmp_softmax_chunk_size;   // head_dim x kv_seq_chunk_size
+    scalar_t* tile_out = tile_VT + head_dim * kv_seq_chunk_size; // q_seq_chunk_size x head_dim
+    scalar_t* old_softmax_m = tile_out + q_seq_chunk_size * head_dim;    // q_seq_chunk_size x 1
+    scalar_t* old_softmax_sum = old_softmax_m + q_seq_chunk_size * 1;  // q_seq_chunk_size x 1
 
     // init
     if (threadIdx.x == 0) {
         old_softmax_m[threadIdx.y] = -INFINITY;
         old_softmax_sum[threadIdx.y] = 0.0;
     }
-    tile_out[threadIdx.y * q_seq_chunk_size + threadIdx.x] = 0.0;
+    if (threadIdx.x < head_dim) {
+        tile_out[threadIdx.y * head_dim + threadIdx.x] = 0.0;
+    }
 
     int64_t batch_id = blockIdx.z / num_heads;
     int64_t head_id = blockIdx.z % num_heads;
@@ -298,13 +310,14 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
     int64_t absolute_range_left = max(0, kv_seqlen - 1 - history_offset - window_size_left);
     for (int chunk_id = 0; 
             chunk_id < (absolute_range_right - absolute_range_left + kv_seq_chunk_size - 1) / kv_seq_chunk_size; 
-            chunk_id++) {
+            chunk_id++) 
+    {
         int64_t virt_kv_token_id = absolute_range_left + chunk_id * kv_seq_chunk_size + threadIdx.y;
-        int64_t phy_block_id = block_table[
-            bt_stride0 * batch_id + 
-            bt_stride1 * (virt_kv_token_id / block_size) // virt block id
-        ];
         if (virt_kv_token_id < kv_seqlen && threadIdx.x < head_dim) {
+            int64_t phy_block_id = block_table[
+                bt_stride0 * batch_id + 
+                bt_stride1 * (virt_kv_token_id / block_size) // virt block id
+            ];
             tile_K[threadIdx.y * head_dim + threadIdx.x] = k[
                 k_stride0 * phy_block_id +
                 k_stride1 * (virt_kv_token_id % block_size) +
@@ -350,10 +363,11 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
         __syncthreads();
         
         
-        int bound = blockDim.x/2;
-        if (threadIdx.x < bound) {
+        int bound = blockDim.x/2;        // assert window_chunk_size < blockDim.x
+        if (threadIdx.x < bound && threadIdx.x < window_chunk_size) {
             scalar_t v = tile_softmax[threadIdx.y * window_chunk_size + threadIdx.x];
-            scalar_t neighbor = tile_softmax[threadIdx.y * window_chunk_size + threadIdx.x + bound];
+            scalar_t neighbor = (threadIdx.x + bound < window_chunk_size) ?
+                 tile_softmax[threadIdx.y * window_chunk_size + threadIdx.x + bound] : -INFINITY;
             scalar_t max_ = max(v, neighbor);
             scalar_t sum_ = __expf(v - max_) + __expf(neighbor - max_);
             tile_softmax_m[threadIdx.y * tmp_softmax_chunk_size + threadIdx.x] = max_;
@@ -373,7 +387,7 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
             }
             __syncthreads();
         }
-        scalar_t m = tile_softmax_m[threadIdx.y * tmp_softmax_chunk_size + threadIdx.x;
+        scalar_t m = tile_softmax_m[threadIdx.y * tmp_softmax_chunk_size + threadIdx.x];
         scalar_t sum = tile_softmax_sum[threadIdx.y * tmp_softmax_chunk_size + threadIdx.x];
         if (threadIdx.x < warpSize) {
             scalar_t neighbor_m = __shfl_down_sync(0xffffffff, m, 16);
@@ -420,6 +434,10 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
 
         // tile matmul P @ V
         if (virt_kv_token_id < kv_seqlen && threadIdx.x < head_dim) {   // 转置读入，方便后续对位相乘
+            int64_t phy_block_id = block_table[
+                bt_stride0 * batch_id + 
+                bt_stride1 * (virt_kv_token_id / block_size) // virt block id
+            ];
             tile_VT[kv_seq_chunk_size * threadIdx.x + threadIdx.y] = 
                 v[
                     v_stride0 * phy_block_id + 
@@ -439,12 +457,12 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
             __syncthreads();
             for(int bound=blockDim.x/2; bound >= warpSize; bound /= 2) {
                 if (threadIdx.x < bound) {
-                    tile_VT[vt_tile_row_id * kv_seq_chunk_size + threadIdx] += 
-                        tile_VT[vt_tile_row_id * kv_seq_chunk_size + threadIdx + bound];
+                    tile_VT[vt_tile_row_id * kv_seq_chunk_size + threadIdx.x] += 
+                        tile_VT[vt_tile_row_id * kv_seq_chunk_size + threadIdx.x + bound];
                 }
                 __syncthreads();
             }
-            result = tile_VT[vt_tile_row_id * kv_seq_chunk_size + threadIdx];
+            result = tile_VT[vt_tile_row_id * kv_seq_chunk_size + threadIdx.x];
             if (threadIdx.x < warpSize) {
                 result += __shfl_down_sync(0xffffffff, result, 16);
                 result += __shfl_down_sync(0xffffffff, result, 8);
@@ -509,9 +527,13 @@ torch::Tensor flash_attn_varlen_with_block_v2(
         );
     int tile_size = block.y * head_dim +
                     block.y * head_dim + 
-                    block.y * (window_size_right - window_size_left) + 
-                    block.x * block.y + 
-                    block.x * block.y;
+                    block.y * block.y + 
+                    block.y * block.y/2 + 
+                    block.y * block.y/2 + 
+                    head_dim * block.y +
+                    block.y * head_dim +
+                    block.y * 1 + 
+                    block.y * 1;
 
     flash_attn_varlen_with_block_kernel_v2<at::BFloat16><<<grid, block, sizeof(at::BFloat16) * tile_size>>>(
         q.const_data_ptr<at::BFloat16>(),
