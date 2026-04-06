@@ -6,7 +6,7 @@ import torch
 
 from vllm.v1.attention.backend import AttentionImpl, AttentionLayer, AttentionType
 
-from .flash_attention_func import flash_attn_varlen_func
+from .flash_attention_func import flash_attn_varlen_func, flash_attn_varlen_with_block_cu
 
 if TYPE_CHECKING:
     from .backend import ToyFlashAttentionMetadata
@@ -103,7 +103,7 @@ class ToyFlashAttentionImpl(AttentionImpl["ToyFlashAttentionMetadata"]):
 
         key_cache, value_cache = kv_cache[0], kv_cache[1]
 
-        flash_attn_varlen_func(
+        flash_attn_varlen_with_block_cu(
             q=query[:num_actual_tokens],
             k=key_cache,
             v=value_cache,

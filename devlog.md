@@ -3,6 +3,9 @@
 写一个触发大量bank conflict的代码，并nsys查看效果
 
 ## Dev Log
+### 20260406
+排除flash attn cuda实现的大多数边界问题，还缺少head dim对非2指数幂支持，以及稳定性提升。
+
 ### 20260403
 完成一版本单kernel的flash attention代码开发。有bug,待调试排查。
 
