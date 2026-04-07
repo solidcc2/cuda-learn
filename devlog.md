@@ -4,7 +4,16 @@
 
 ## Dev Log
 ### 20260407
-MileStone: flash attn cuda代码跑通，计算结果有错误。
+MileStone: 
+1. flash attn cuda代码跑通，计算结果有错误(nan稳定性问题)。
+2. 增加调试辅助函数check_nan_val & check_infinite_val, 封装计算，排查nan引入。
+3. 增加safe_sub & softmax_div避免减法引入nan。
+4. head_dim=64 num_head=2 token=6 对拍测试初步通过。执行推理可以得到结果不一致，怀疑是数值精度问题。
+torch结果:
+> I am a former student of the University of California, Berkeley, and I am a member of the Board of Trustees of the University of California
+Toy Attention cuda结果
+> The number of the number of the number of the number of the number the number of the number of the number the of number the number the number the
+
 
 ### 20260406
 排除flash attn cuda实现的大多数边界问题，还缺少head dim对非2指数幂支持，以及稳定性提升。

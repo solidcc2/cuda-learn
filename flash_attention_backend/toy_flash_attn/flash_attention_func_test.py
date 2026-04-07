@@ -33,6 +33,11 @@ def _require_fa2_cuda() -> None:
         raise unittest.SkipTest("This test expects FA2 to be active.")
 
 
+def _require_cuda() -> None:
+    if not torch.cuda.is_available():
+        raise unittest.SkipTest("CUDA is required for this test.")
+
+
 def _make_inputs(
     q_lens: list[int],
     k_lens: list[int] | None = None,
@@ -105,7 +110,7 @@ def _make_block_cache(
         (len(k_lens), max_blocks_per_seq),
         -1,
         device=k_dense.device,
-        dtype=torch.long,
+        dtype=torch.int32,
     )
 
     # Shuffle physical block ids so the test exercises logical->physical
@@ -386,6 +391,13 @@ def _assert_close_with_block_cu(
         block_table=block_table,
     )
 
+    diff = (out_cu.float() - out_ref.float()).abs()
+    print("max diff:", diff.max().item())
+    print("mean diff:", diff.mean().item())
+    print("out_ref[0:5]:", out_ref[:5])
+    print("out_cu[0:5]:", out_cu[:5])
+
+
     assert out_cu.shape == out_ref.shape
     assert torch.allclose(out_cu, out_ref, atol=3e-2, rtol=3e-2), (
         f"Mismatch with q_lens={q_lens}, k_lens={k_lens}, causal={causal}, "
@@ -394,7 +406,7 @@ def _assert_close_with_block_cu(
     print(f"[PASS] {case_desc}")
 
 
-class FlashAttentionFuncTest(unittest.TestCase):
+class FlashAttentionFuncFa2ParityTest(unittest.TestCase):
     def setUp(self) -> None:
         _require_fa2_cuda()
 
@@ -456,30 +468,6 @@ class FlashAttentionFuncTest(unittest.TestCase):
             use_block=True,
         )
 
-    def test_with_block_cu_matches_python_causal_attention_bf16(self) -> None:
-        _assert_close_with_block_cu(
-            q_lens=[3, 5],
-            k_lens=None,
-            causal=True,
-            window_size=None,
-        )
-
-    def test_with_block_cu_matches_python_full_attention_bf16(self) -> None:
-        _assert_close_with_block_cu(
-            q_lens=[3, 5],
-            k_lens=None,
-            causal=False,
-            window_size=None,
-        )
-
-    def test_with_block_cu_matches_python_tail_aligned_suffix_query_bf16(self) -> None:
-        _assert_close_with_block_cu(
-            q_lens=[2, 3],
-            k_lens=[5, 7],
-            causal=True,
-            window_size=None,
-        )
-
     def test_without_block_matches_fa2_different_head_shapes(self) -> None:
         cases = [
             {"q_lens": [2, 5], "num_heads": 1, "head_dim": 8},
@@ -510,6 +498,54 @@ class FlashAttentionFuncTest(unittest.TestCase):
                     k_lens=None,
                     causal=case["causal"],
                     window_size=case["window_size"],
+                )
+
+
+class FlashAttentionFuncCuKernelParityTest(unittest.TestCase):
+    def setUp(self) -> None:
+        _require_cuda()
+
+    def test_with_block_cu_matches_python_causal_attention_bf16(self) -> None:
+        _assert_close_with_block_cu(
+            q_lens=[3, 5],
+            k_lens=None,
+            causal=True,
+            window_size=None,
+        )
+
+    def test_with_block_cu_matches_python_full_attention_bf16(self) -> None:
+        _assert_close_with_block_cu(
+            q_lens=[3, 5],
+            k_lens=None,
+            causal=False,
+            window_size=None,
+        )
+
+    def test_with_block_cu_matches_python_tail_aligned_suffix_query_bf16(self) -> None:
+        _assert_close_with_block_cu(
+            q_lens=[2, 3],
+            k_lens=[5, 7],
+            causal=True,
+            window_size=None,
+        )
+
+    # @unittest.expectedFailure
+    def test_with_block_cu_head_dim_coverage_targets(self) -> None:
+        cases = [
+            # {"q_lens": [2, 5], "num_heads": 1, "head_dim": 8},
+            # {"q_lens": [3, 4], "num_heads": 4, "head_dim": 16},
+            # {"q_lens": [2, 6], "num_heads": 2, "head_dim": 32},
+            {"q_lens": [2, 6], "num_heads": 2, "head_dim": 64},
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                _assert_close_with_block_cu(
+                    q_lens=case["q_lens"],
+                    k_lens=None,
+                    causal=False,
+                    window_size=None,
+                    num_heads=case["num_heads"],
+                    head_dim=case["head_dim"],
                 )
 
 

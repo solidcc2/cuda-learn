@@ -1,6 +1,36 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <string>
+// #define DEBUG_NUMERIC
+
+
+__device__ inline float check_nan_val(float x, const char* tag) {
+#ifdef DEBUG_NUMERIC
+    if (isnan(x)) {
+        printf("%s nan: %f tx=%d ty=%d bx=%d by=%d bz=%d\n",
+               tag, x, threadIdx.x, threadIdx.y, blockIdx.x, blockIdx.y, blockIdx.z);
+    }
+#endif
+    return x;
+}
+
+__device__ inline float check_infinite_val(float x, const char* tag) {
+#ifdef DEBUG_NUMERIC
+    if (!isfinite(x)) {
+        printf("%s isfinite: %f tx=%d ty=%d bx=%d by=%d bz=%d\n",
+               tag, x, threadIdx.x, threadIdx.y, blockIdx.x, blockIdx.y, blockIdx.z);
+    }
+#endif
+    return x;
+}
+
+__device__ inline float safe_sub(float a, float b) {
+    return (isfinite(a) && isfinite(b)) ? a - b : -INFINITY;     
+}
+
+__device__ inline float softmax_div(float a, float b) {
+    return (b != 0.0) ? a/b : 0.0;
+}
 
 void check_inputs(
     torch::Tensor q,
@@ -72,12 +102,14 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
     scalar_t* tile_softmax_sum = tile_softmax_m + q_seq_chunk_size * window_chunk_size; // q_seq_chunk_size x window_chunk_size
     scalar_t* tile_VT = tile_softmax_sum + q_seq_chunk_size * window_chunk_size;   // head_dim x kv_seq_chunk_size
     scalar_t* tile_out = tile_VT + head_dim * kv_seq_chunk_size; // q_seq_chunk_size x head_dim
-    scalar_t* old_softmax_m = tile_out + q_seq_chunk_size * head_dim;    // q_seq_chunk_size x 1
-    scalar_t* old_softmax_sum = old_softmax_m + q_seq_chunk_size * 1;  // q_seq_chunk_size x 1
+    scalar_t* tile_old_softmax_m = tile_out + q_seq_chunk_size * head_dim;    // q_seq_chunk_size x 1
+    scalar_t* tile_old_softmax_sum = tile_old_softmax_m + q_seq_chunk_size * 1;  // q_seq_chunk_size x 1
+    scalar_t* tile_dotQK = tile_old_softmax_sum + q_seq_chunk_size * 1;   // q_seq_chunk_size x head_dim
+    scalar_t* tile_dotPV = tile_dotQK + q_seq_chunk_size * head_dim;        // window_chunk_size * kv_seq_chunk_size
     // init
     if (threadIdx.x == 0) {
-        old_softmax_m[threadIdx.y] = neg_inf;
-        old_softmax_sum[threadIdx.y] = scalar_t(0);
+        tile_old_softmax_m[threadIdx.y] = neg_inf;
+        tile_old_softmax_sum[threadIdx.y] = scalar_t(0);
     }
     if (threadIdx.x < head_dim) {
         tile_out[threadIdx.y * head_dim + threadIdx.x] = scalar_t(0);
@@ -91,11 +123,11 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
     
     // gather tile_Q
     if (q_token_id < q_seqlen && threadIdx.x < head_dim) {
-        tile_Q[threadIdx.y * head_dim + threadIdx.x] = q[
+        tile_Q[threadIdx.y * head_dim + threadIdx.x] = check_nan_val(q[
             q_stride0 * (cu_seqlens_q[batch_id] + q_token_id) + 
             q_stride1 * head_id +
             q_stride2 * threadIdx.x
-        ];
+        ], "tile_for_q");
     } else {
         tile_Q[threadIdx.y * head_dim + threadIdx.x] = scalar_t(0);
     }
@@ -121,12 +153,12 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
                 bt_stride0 * batch_id + 
                 bt_stride1 * (virt_kv_token_id / block_size) // virt block id
             ];
-            tile_K[threadIdx.y * head_dim + threadIdx.x] = k[
+            tile_K[threadIdx.y * head_dim + threadIdx.x] = check_nan_val(k[
                 k_stride0 * phy_block_id +
                 k_stride1 * (virt_kv_token_id % block_size) +
                 k_stride2 * head_id +
                 k_stride3 * threadIdx.x
-            ];
+            ], "tile_for_k");
         } else {
             tile_K[threadIdx.y * head_dim + threadIdx.x] = scalar_t(0);
         }
@@ -134,28 +166,28 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
 
         // tile matmul
         for(int k_tile_row_id = 0; k_tile_row_id < kv_seq_chunk_size; k_tile_row_id ++) {
-            scalar_t result = tile_Q[threadIdx.y * head_dim + threadIdx.x] * tile_K[k_tile_row_id * head_dim + threadIdx.x];
-            tile_K[k_tile_row_id * head_dim + threadIdx.x] = result;
+            scalar_t result = check_nan_val(tile_Q[threadIdx.y * head_dim + threadIdx.x] * tile_K[k_tile_row_id * head_dim + threadIdx.x], "Q_dot_K");
+            tile_dotQK[threadIdx.y * head_dim + threadIdx.x] = result;
             __syncthreads();
             for(int bound = blockDim.x / 2; bound >= warpSize && head_dim > warpSize; bound /= 2) {
                 if (threadIdx.x < bound) {
-                    result += tile_K[k_tile_row_id * head_dim + threadIdx.x + bound];
-                    tile_K[k_tile_row_id * head_dim + threadIdx.x] = result;
+                    result = check_nan_val(result + tile_dotQK[threadIdx.y * head_dim + threadIdx.x + bound], "QK_mul_sum_in_block");
+                    tile_dotQK[threadIdx.y * head_dim + threadIdx.x] = result;
                 }
                 __syncthreads();
             }
             if (threadIdx.x < warpSize) {
-                result += __shfl_down_sync(0xffffffff, result, 16);
-                result += __shfl_down_sync(0xffffffff, result, 8);
-                result += __shfl_down_sync(0xffffffff, result, 4);
-                result += __shfl_down_sync(0xffffffff, result, 2);
-                result += __shfl_down_sync(0xffffffff, result, 1);
+                result = check_nan_val(result + __shfl_down_sync(0xffffffff, result, 16), "QK_mul_sum_in_warp_16");
+                result = check_nan_val(result + __shfl_down_sync(0xffffffff, result, 8), "QK_mul_sum_in_warp_8");
+                result = check_nan_val(result + __shfl_down_sync(0xffffffff, result, 4), "QK_mul_sum_in_warp_4");
+                result = check_nan_val(result + __shfl_down_sync(0xffffffff, result, 2), "QK_mul_sum_in_warp_2");
+                result = check_nan_val(result + __shfl_down_sync(0xffffffff, result, 1), "QK_mul_sum_in_warp_1");
             }
             if (threadIdx.x == 0 && absolute_range_left + chunk_id * window_chunk_size + k_tile_row_id < absolute_range_right) {
                 tile_softmax[
                     threadIdx.y * window_chunk_size + 
                     k_tile_row_id
-                ] = result / sqrt(head_dim);
+                ] = check_nan_val(result / sqrt(head_dim), "score");
             } else if (threadIdx.x == 0) {
                 tile_softmax[
                     threadIdx.y * window_chunk_size + 
@@ -174,7 +206,7 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
         } 
         int bound = blockDim.x / 2;
         for (; bound >= warpSize; bound /= 2){
-            if (threadIdx.x < bound) {
+            if (threadIdx.x + bound < window_chunk_size) {
                 scalar_t m_ = (threadIdx.x < window_chunk_size) ? 
                                     tile_softmax_m[threadIdx.y * window_chunk_size + threadIdx.x] : neg_inf;
                 scalar_t m_neighbor = (threadIdx.x + bound < window_chunk_size) ? 
@@ -184,8 +216,9 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
                                     tile_softmax_sum[threadIdx.y * window_chunk_size + threadIdx.x] : scalar_t(0);
                 scalar_t sum_neighbor = (threadIdx.x + bound < window_chunk_size) ? 
                                     tile_softmax_sum[threadIdx.y * window_chunk_size + threadIdx.x + bound] : scalar_t(0);
-                scalar_t merge_m = max(m_, m_neighbor);
-                scalar_t merge_sum = sum_ * __expf(m_ - merge_m) + sum_neighbor * __expf(m_neighbor - merge_m);
+                scalar_t merge_m = check_nan_val(max(m_, m_neighbor), "merge_m");
+                scalar_t merge_sum = check_nan_val(sum_ * __expf(safe_sub(m_, merge_m)) + 
+                                sum_neighbor * __expf(safe_sub(m_neighbor, merge_m)), "merge_sum");
                 tile_softmax_m[threadIdx.y * window_chunk_size + threadIdx.x] = merge_m;
                 tile_softmax_sum[threadIdx.y * window_chunk_size + threadIdx.x] = merge_sum;
             }         
@@ -200,32 +233,48 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
                                     tile_softmax_sum[threadIdx.y * window_chunk_size + threadIdx.x] : scalar_t(0);
             m_neighbor = __shfl_down_sync(0xffffffff, m_, 16);
             sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 16);
-            merge_m = max(m_, m_neighbor);
-            sum_ = sum_ * __expf(m_ - merge_m) + sum_neighbor * __expf(m_neighbor - merge_m);
+            unsigned int y_neighbor = __shfl_down_sync(0xffffffff, threadIdx.y, 16);
+            assert(y_neighbor == threadIdx.y);
+            merge_m = check_nan_val(max(m_, m_neighbor), "warp_merge_m");
+            check_infinite_val(sum_, "sum_");
+            check_infinite_val(sum_neighbor, "sum_neighbor");
+            sum_ = check_infinite_val(sum_ * __expf(safe_sub(m_, merge_m)) + sum_neighbor * __expf(safe_sub(m_neighbor, merge_m)), "warp_merge_sum");
             m_ = merge_m;
 
             m_neighbor = __shfl_down_sync(0xffffffff, m_, 8);
             sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 8);
-            merge_m = max(m_, m_neighbor);
-            sum_ = sum_ * __expf(m_ - merge_m) + sum_neighbor * __expf(m_neighbor - merge_m);
+            y_neighbor = __shfl_down_sync(0xffffffff, threadIdx.y, 8);
+            assert(y_neighbor == threadIdx.y);
+            merge_m = check_nan_val(max(m_, m_neighbor), "warp_merge_m");
+            check_infinite_val(sum_neighbor, "sum_neighbor");
+            sum_ = check_infinite_val(sum_ * __expf(safe_sub(m_, merge_m)) + sum_neighbor * __expf(safe_sub(m_neighbor, merge_m)), "warp_merge_sum");
             m_ = merge_m;
 
             m_neighbor = __shfl_down_sync(0xffffffff, m_, 4);
             sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 4);
-            merge_m = max(m_, m_neighbor);
-            sum_ = sum_ * __expf(m_ - merge_m) + sum_neighbor * __expf(m_neighbor - merge_m);
+            y_neighbor = __shfl_down_sync(0xffffffff, threadIdx.y, 4);
+            assert(y_neighbor == threadIdx.y);
+            merge_m = check_nan_val(max(m_, m_neighbor), "warp_merge_m");
+            check_infinite_val(sum_neighbor, "sum_neighbor");
+            sum_ = check_infinite_val(sum_ * __expf(safe_sub(m_, merge_m)) + sum_neighbor * __expf(safe_sub(m_neighbor, merge_m)), "warp_merge_sum");
             m_ = merge_m;
 
             m_neighbor = __shfl_down_sync(0xffffffff, m_, 2);
             sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 2);
-            merge_m = max(m_, m_neighbor);
-            sum_ = sum_ * __expf(m_ - merge_m) + sum_neighbor * __expf(m_neighbor - merge_m);
+            y_neighbor = __shfl_down_sync(0xffffffff, threadIdx.y, 2);
+            assert(y_neighbor == threadIdx.y);
+            merge_m = check_nan_val(max(m_, m_neighbor), "warp_merge_m");
+            check_infinite_val(sum_neighbor, "sum_neighbor");
+            sum_ = check_infinite_val(sum_ * __expf(safe_sub(m_, merge_m)) + sum_neighbor * __expf(safe_sub(m_neighbor, merge_m)), "warp_merge_sum");
             m_ = merge_m;
 
             m_neighbor = __shfl_down_sync(0xffffffff, m_, 1);
             sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 1);
-            merge_m = max(m_, m_neighbor);
-            sum_ = sum_ * __expf(m_ - merge_m) + sum_neighbor * __expf(m_neighbor - merge_m);
+            y_neighbor = __shfl_down_sync(0xffffffff, threadIdx.y, 1);
+            assert(y_neighbor == threadIdx.y);
+            merge_m = check_nan_val(max(m_, m_neighbor), "warp_merge_m");
+            check_infinite_val(sum_neighbor, "sum_neighbor");
+            sum_ = check_infinite_val(sum_ * __expf(safe_sub(m_, merge_m)) + sum_neighbor * __expf(safe_sub(m_neighbor, merge_m)), "warp_merge_sum");
             m_ = merge_m;
 
             if (threadIdx.x == 0) { // 复用 首列表达chunk m & sum
@@ -237,22 +286,25 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
         __syncthreads();
         if (threadIdx.x < window_chunk_size) {
             scalar_t val = tile_softmax[threadIdx.y * window_chunk_size + threadIdx.x];
-            tile_softmax[threadIdx.y * window_chunk_size + threadIdx.x] = 
-                __expf(val - tile_softmax_m[threadIdx.y * window_chunk_size + 0]) / tile_softmax_sum[threadIdx.y * window_chunk_size + 0];
+            tile_softmax[threadIdx.y * window_chunk_size + threadIdx.x] = check_nan_val(
+                softmax_div(
+                    __expf(safe_sub(val, tile_softmax_m[threadIdx.y * window_chunk_size + 0])), tile_softmax_sum[threadIdx.y * window_chunk_size + 0]),
+                "softmax");
         }
         __syncthreads();
 
 
-        // scalar_t old_sum = (q_token_id < q_seqlen) ? old_softmax_sum[threadIdx.y]: scalar_t(0);
+        // scalar_t old_sum = (q_token_id < q_seqlen) ? tile_old_softmax_sum[threadIdx.y]: scalar_t(0);
         // scalar_t new_sum = (q_token_id < q_seqlen) ? tile_softmax_sum[threadIdx.y * window_chunk_size] : scalar_t(0);
-        // scalar_t old_m = (q_token_id < q_seqlen) ? old_softmax_m[threadIdx.y] : neg_inf;
+        // scalar_t old_m = (q_token_id < q_seqlen) ? tile_old_softmax_m[threadIdx.y] : neg_inf;
         // scalar_t new_m = (q_token_id < q_seqlen) ? tile_softmax_m[threadIdx.y * window_chunk_size] : neg_inf;
-        scalar_t old_sum = old_softmax_sum[threadIdx.y];
+        scalar_t old_sum = tile_old_softmax_sum[threadIdx.y];
         scalar_t new_sum = tile_softmax_sum[threadIdx.y * window_chunk_size];
-        scalar_t old_m = old_softmax_m[threadIdx.y];
+        scalar_t old_m = tile_old_softmax_m[threadIdx.y];
         scalar_t new_m = tile_softmax_m[threadIdx.y * window_chunk_size];
         scalar_t merge_m = (q_token_id < q_seqlen) ? static_cast<scalar_t>(max(new_m, old_m)) : neg_inf;
-        scalar_t merge_sum = (q_token_id < q_seqlen) ? static_cast<scalar_t>(old_sum * __expf(old_m - merge_m) + new_sum * __expf(new_m - merge_m)) : scalar_t(0);
+        scalar_t merge_sum = (q_token_id < q_seqlen) ? static_cast<scalar_t>(old_sum * __expf(safe_sub(old_m, merge_m)) 
+                                                                            + new_sum * __expf(safe_sub(new_m, merge_m))) : scalar_t(0);
 
         // tile matmul P @ V
         if (virt_kv_token_id < absolute_range_right && threadIdx.x < head_dim) {   // 转置读入，方便后续对位相乘
@@ -276,24 +328,24 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
             if (threadIdx.x < window_chunk_size) {
                 scalar_t result = tile_softmax[threadIdx.y * window_chunk_size + threadIdx.x] *
                                                                                 tile_VT[vt_tile_row_id * kv_seq_chunk_size + threadIdx.x];
-                tile_VT[vt_tile_row_id * kv_seq_chunk_size + threadIdx.x] = result;                                                                
+                tile_dotPV[threadIdx.y * kv_seq_chunk_size + threadIdx.x] = result;                                                                
             }
             __syncthreads();
             for(int bound=blockDim.x/2; bound >= warpSize; bound /= 2) {
                 if (threadIdx.x < bound) {
                     scalar_t raw = (threadIdx.x < kv_seq_chunk_size) ? 
-                                        tile_VT[vt_tile_row_id * kv_seq_chunk_size + threadIdx.x] : scalar_t(0);
+                                        tile_dotPV[threadIdx.y * kv_seq_chunk_size + threadIdx.x] : scalar_t(0);
                     scalar_t raw_neighbor = (threadIdx.x + bound < kv_seq_chunk_size) ? 
-                                        tile_VT[vt_tile_row_id * kv_seq_chunk_size + threadIdx.x + bound] : scalar_t(0);
+                                        tile_dotPV[threadIdx.y * kv_seq_chunk_size + threadIdx.x + bound] : scalar_t(0);
                     if (threadIdx.x < kv_seq_chunk_size) {
-                        tile_VT[vt_tile_row_id * kv_seq_chunk_size + threadIdx.x] = raw + raw_neighbor;
+                        tile_dotPV[threadIdx.y * kv_seq_chunk_size + threadIdx.x] = raw + raw_neighbor;
                     }
 
                 }
                 __syncthreads();
             }
             if (threadIdx.x < warpSize) {
-                scalar_t result = (threadIdx.x < kv_seq_chunk_size) ? tile_VT[vt_tile_row_id * kv_seq_chunk_size + threadIdx.x] : scalar_t(0);
+                scalar_t result = (threadIdx.x < kv_seq_chunk_size) ? tile_dotPV[threadIdx.y * kv_seq_chunk_size + threadIdx.x] : scalar_t(0);
                 result += __shfl_down_sync(0xffffffff, result, 16);
                 result += __shfl_down_sync(0xffffffff, result, 8);
                 result += __shfl_down_sync(0xffffffff, result, 4);
@@ -302,15 +354,15 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
 
                 if (threadIdx.x == 0) {
                     scalar_t e = tile_out[threadIdx.y * head_dim + vt_tile_row_id];
-                    e = (merge_sum != 0) ?
-                        scalar_t(e * old_sum / merge_sum * __expf(old_m - merge_m) + result * new_sum / merge_sum * __expf(new_m - merge_m)) : scalar_t(0);
+                    e = scalar_t(e * softmax_div(old_sum, merge_sum) * __expf(safe_sub(old_m, merge_m)) + result * softmax_div(new_sum, merge_sum) 
+                        * __expf(safe_sub(new_m, merge_m)));
                     tile_out[threadIdx.y * head_dim + vt_tile_row_id] = e;
                 }
             }
         }
         if (threadIdx.x == 0) {
-            old_softmax_m[threadIdx.y] = merge_m;
-            old_softmax_sum[threadIdx.y] = merge_sum;
+            tile_old_softmax_m[threadIdx.y] = merge_m;
+            tile_old_softmax_sum[threadIdx.y] = merge_sum;
         }
         __syncthreads();
     }
@@ -363,7 +415,9 @@ torch::Tensor flash_attn_varlen_with_block_v2(
                     head_dim * block.y +
                     block.y * head_dim +
                     block.y * 1 + 
-                    block.y * 1;
+                    block.y * 1 + 
+                    block.y * head_dim +
+                    block.y * block.y;
 
     flash_attn_varlen_with_block_kernel_v2<at::BFloat16><<<grid, block, sizeof(at::BFloat16) * tile_size>>>(
         q.const_data_ptr<at::BFloat16>(),
