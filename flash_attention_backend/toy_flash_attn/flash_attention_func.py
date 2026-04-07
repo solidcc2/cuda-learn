@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import torch
 
 from pathlib import Path
@@ -7,6 +8,48 @@ from pathlib import Path
 from torch.utils.cpp_extension import load
 
 _THIS_DIR = Path(__file__).resolve().parent
+
+_CUDA_VALUE_DTYPE = torch.bfloat16
+_CUDA_INDEX_DTYPE = torch.int32
+
+
+def _tensor_debug_str(name: str, tensor: torch.Tensor | None) -> str:
+    if tensor is None:
+        return f"{name}=None"
+    return (
+        f"{name}(shape={tuple(tensor.shape)}, dtype={tensor.dtype}, "
+        f"device={tensor.device}, contiguous={tensor.is_contiguous()})"
+    )
+
+
+def _maybe_log_cuda_inputs(**tensors: torch.Tensor | None) -> None:
+    if os.environ.get("TOY_FLASH_ATTN_DEBUG", "0") != "1":
+        return
+    print(
+        "[toy_flash_attn] flash_attn_varlen_with_block_cu inputs:",
+        ", ".join(_tensor_debug_str(name, tensor) for name, tensor in tensors.items()),
+        flush=True,
+    )
+
+
+def _check_cuda_tensor(
+    name: str,
+    tensor: torch.Tensor,
+    *,
+    expected_device: torch.device,
+    expected_dtype: torch.dtype,
+) -> None:
+    if tensor.device != expected_device:
+        raise ValueError(
+            f"{name}.device={tensor.device} does not match q.device={expected_device}"
+        )
+    if tensor.dtype != expected_dtype:
+        raise TypeError(
+            f"{name}.dtype={tensor.dtype} does not match CUDA op requirement "
+            f"{expected_dtype}"
+        )
+
+
 # compile + load cu
 _ops = load(
     name="toy_torch_flash_attention_func",
@@ -40,7 +83,8 @@ def flash_attn_varlen_func(
         q和kv尾对齐
     '''
     if block_table is not None:
-        return flash_attn_varlen_with_block(q, k, v, max_seqlen_q, cu_seqlens_q, max_seqlen_k, seqused_k, causal, window_size, block_table, out)
+        return flash_attn_varlen_with_block_cu(q, k, v, max_seqlen_q, cu_seqlens_q, max_seqlen_k, seqused_k, causal, window_size, block_table, out)
+        # return flash_attn_varlen_with_block(q, k, v, max_seqlen_q, cu_seqlens_q, max_seqlen_k, seqused_k, causal, window_size, block_table, out)
     else:
         return flash_attn_varlen_without_block(q, k, v, max_seqlen_q,cu_seqlens_q, max_seqlen_k, cu_seqlens_k, causal, window_size, out)
 
@@ -160,6 +204,45 @@ def flash_attn_varlen_with_block_cu(
         out = torch.empty_like(q)
     if window_size is None:
         window_size = (-1, -1)
+    if block_table is None:
+        raise ValueError("block_table must not be None for flash_attn_varlen_with_block_cu")
+    if not q.is_cuda:
+        raise ValueError("flash_attn_varlen_with_block_cu expects CUDA tensors")
+
+    _maybe_log_cuda_inputs(
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens_q=cu_seqlens_q,
+        seqused_k=seqused_k,
+        block_table=block_table,
+        out=out,
+    )
+
+    expected_device = q.device
+    _check_cuda_tensor("q", q, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
+    _check_cuda_tensor("k", k, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
+    _check_cuda_tensor("v", v, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
+    _check_cuda_tensor(
+        "cu_seqlens_q",
+        cu_seqlens_q,
+        expected_device=expected_device,
+        expected_dtype=_CUDA_INDEX_DTYPE,
+    )
+    _check_cuda_tensor(
+        "seqused_k",
+        seqused_k,
+        expected_device=expected_device,
+        expected_dtype=_CUDA_INDEX_DTYPE,
+    )
+    _check_cuda_tensor(
+        "block_table",
+        block_table,
+        expected_device=expected_device,
+        expected_dtype=_CUDA_INDEX_DTYPE,
+    )
+    _check_cuda_tensor("out", out, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
+
     return _ops.flash_attn_varlen_with_block(q, k, v, 
                                     max_seqlen_q, cu_seqlens_q,
                                     max_seqlen_k, seqused_k,

@@ -17,9 +17,9 @@ void check_inputs(
     torch::Tensor out) {
 
     TORCH_CHECK(q.sizes() == out.sizes(), "q and out must have the same shape");
-    TORCH_CHECK(q.is_contiguous(), "q is not contiguous");
-    TORCH_CHECK(k.is_contiguous(), "k is not contiguous");
-    TORCH_CHECK(v.is_contiguous(), "v is not contiguous");
+    // TORCH_CHECK(q.is_contiguous(), "q is not contiguous");
+    // TORCH_CHECK(k.is_contiguous(), "k is not contiguous");
+    // TORCH_CHECK(v.is_contiguous(), "v is not contiguous");
     TORCH_CHECK(q.size(1) == k.size(2), "GQA not support, num_head must equal num_kv_head");
 }
 
@@ -102,6 +102,13 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
     // window size 边界调整
     int64_t history_offset = q_seqlen - 1 - q_token_id; // history offset
     // [absolute_range_left, absolute_range_right)
+    if (window_size_left == -1 && window_size_right == -1) {
+        window_size_left = kv_seqlen;
+        window_size_right = kv_seqlen;
+    }
+    if (causal == true) {
+        window_size_right = 0;
+    }
     int64_t absolute_range_right = min(kv_seqlen, kv_seqlen - history_offset + window_size_right); // 开区间
     int64_t absolute_range_left = max(int64_t{0}, kv_seqlen - 1 - history_offset - window_size_left);
     for (int chunk_id = 0; 
@@ -130,7 +137,7 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
             scalar_t result = tile_Q[threadIdx.y * head_dim + threadIdx.x] * tile_K[k_tile_row_id * head_dim + threadIdx.x];
             tile_K[k_tile_row_id * head_dim + threadIdx.x] = result;
             __syncthreads();
-            for(int bound = blockDim.x / 2; bound >= warpSize; bound /= 2) {
+            for(int bound = blockDim.x / 2; bound >= warpSize && head_dim > warpSize; bound /= 2) {
                 if (threadIdx.x < bound) {
                     result += tile_K[k_tile_row_id * head_dim + threadIdx.x + bound];
                     tile_K[k_tile_row_id * head_dim + threadIdx.x] = result;
@@ -244,8 +251,8 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
         scalar_t new_sum = tile_softmax_sum[threadIdx.y * window_chunk_size];
         scalar_t old_m = old_softmax_m[threadIdx.y];
         scalar_t new_m = tile_softmax_m[threadIdx.y * window_chunk_size];
-        scalar_t merge_m = (q_token_id < q_seqlen) ?  max(new_m, old_m) : neg_inf;
-        scalar_t merge_sum = (q_token_id < q_seqlen) ? old_sum * __expf(old_m - merge_m) + new_sum * __expf(new_m - merge_m) : scalar_t(0);
+        scalar_t merge_m = (q_token_id < q_seqlen) ? static_cast<scalar_t>(max(new_m, old_m)) : neg_inf;
+        scalar_t merge_sum = (q_token_id < q_seqlen) ? static_cast<scalar_t>(old_sum * __expf(old_m - merge_m) + new_sum * __expf(new_m - merge_m)) : scalar_t(0);
 
         // tile matmul P @ V
         if (virt_kv_token_id < absolute_range_right && threadIdx.x < head_dim) {   // 转置读入，方便后续对位相乘
