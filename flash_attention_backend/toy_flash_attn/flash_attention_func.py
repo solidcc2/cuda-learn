@@ -247,7 +247,7 @@ def flash_attn_varlen_with_block_cu(
     v = v.to(dtype=torch.float32)
     out = out.to(dtype=torch.float32)
 
-    out = _ops.flash_attn_varlen_with_block(q, k, v, 
+    out = _ops.flash_attn_varlen_with_block_fp32(q, k, v, 
                                     max_seqlen_q, cu_seqlens_q,
                                     max_seqlen_k, seqused_k,
                                     causal, window_size[0], window_size[1],

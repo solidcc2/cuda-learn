@@ -1,8 +1,9 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <string>
-#define DEBUG_NUMERIC
+// #define DEBUG_NUMERIC
 
+#ifdef DEBUG_NUMERIC
 namespace {
 constexpr int kDebugBatchId = 0;
 constexpr int kDebugHeadId = 0;
@@ -10,7 +11,9 @@ constexpr int kDebugQTokenId = 0;
 constexpr int kDebugChunkId = 0;
 constexpr int kDebugWindowElems = 4;
 constexpr int kDebugOutElems = 4;
+constexpr int kDebugVecElems = 4;
 }
+#endif // DEBUG_NUMERIC
 
 
 __device__ inline float check_nan_val(float x, const char* tag) {
@@ -62,7 +65,7 @@ void check_inputs(
     TORCH_CHECK(q.size(1) == k.size(2), "GQA not support, num_head must equal num_kv_head");
 }
 
-#define BLOCK_ROW_V2 8
+#define BLOCK_ROW_V2 1
 
 // block by q_rows
 template<typename scalar_t>
@@ -189,6 +192,35 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
             tile_K[threadIdx.y * head_dim + threadIdx.x] = scalar_t(0);
         }
         __syncthreads();
+#ifdef DEBUG_NUMERIC
+        if (batch_id == kDebugBatchId && head_id == kDebugHeadId &&
+            q_token_id == kDebugQTokenId && chunk_id == kDebugChunkId &&
+            threadIdx.y == 0 && threadIdx.x < min((int)head_dim, kDebugVecElems)) {
+            printf(
+                "kernel_q batch=%lld head=%lld q=%lld dim=%d val=%f\n",
+                (long long)batch_id,
+                (long long)head_id,
+                (long long)q_token_id,
+                threadIdx.x,
+                (float)tile_Q[threadIdx.y * head_dim + threadIdx.x]
+            );
+        }
+        if (batch_id == kDebugBatchId && head_id == kDebugHeadId &&
+            blockIdx.y == 0 && chunk_id == kDebugChunkId &&
+            threadIdx.y < min(window_chunk_size, kDebugWindowElems) &&
+            threadIdx.x < min((int)head_dim, kDebugVecElems)) {
+            printf(
+                "kernel_k batch=%lld head=%lld block_q=%d row=%d kv=%lld dim=%d val=%f\n",
+                (long long)batch_id,
+                (long long)head_id,
+                blockIdx.y * blockDim.y,
+                threadIdx.y,
+                (long long)(absolute_range_left + chunk_id * window_chunk_size + threadIdx.y),
+                threadIdx.x,
+                (float)tile_K[threadIdx.y * head_dim + threadIdx.x]
+            );
+        }
+#endif
 
         // tile matmul
         for(int k_tile_row_id = 0; k_tile_row_id < kv_seq_chunk_size; k_tile_row_id ++) {
@@ -540,5 +572,6 @@ torch::Tensor flash_attn_varlen_with_block_v2(
 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("flash_attn_varlen_with_block", &flash_attn_varlen_with_block_v2<float>, "flash attn varlen with block");
+    // m.def("flash_attn_varlen_with_block_bf16", &flash_attn_varlen_with_block_v2<at::BFloat16>, "flash attn varlen with block");
+    m.def("flash_attn_varlen_with_block_fp32", &flash_attn_varlen_with_block_v2<float>, "flash attn varlen with block");
 }

@@ -63,6 +63,8 @@ def _debug_compare_reference_window(
         f"[DEBUG REF] batch={batch_id} head={head_id} q={q_token_id} "
         f"range=[{left},{right})"
     )
+    print("[DEBUG REF] q[:4]:", q_row[:4])
+    print("[DEBUG REF] k[:4,:4]:", k_dense[left:right][:4, :4])
     print("[DEBUG REF] scores[:4]:", window_scores[:4])
     print("[DEBUG REF] probs[:4]:", probs[:4])
     print("[DEBUG REF] out[:4]:", out[:4])
