@@ -242,10 +242,15 @@ def flash_attn_varlen_with_block_cu(
         expected_dtype=_CUDA_INDEX_DTYPE,
     )
     _check_cuda_tensor("out", out, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
+    q = q.to(dtype=torch.float32)
+    k = k.to(dtype=torch.float32)
+    v = v.to(dtype=torch.float32)
+    out = out.to(dtype=torch.float32)
 
-    return _ops.flash_attn_varlen_with_block(q, k, v, 
+    out = _ops.flash_attn_varlen_with_block(q, k, v, 
                                     max_seqlen_q, cu_seqlens_q,
                                     max_seqlen_k, seqused_k,
                                     causal, window_size[0], window_size[1],
                                     block_table, 
                                     out)
+    return out.to(dtype=_CUDA_VALUE_DTYPE)

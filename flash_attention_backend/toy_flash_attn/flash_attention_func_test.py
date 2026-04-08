@@ -20,6 +20,54 @@ flash_attn_varlen_with_block = _MOD.flash_attn_varlen_with_block
 flash_attn_varlen_with_block_cu = _MOD.flash_attn_varlen_with_block_cu
 
 
+def _debug_compare_reference_window(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seqused_k: torch.Tensor,
+    block_table: torch.Tensor,
+    *,
+    batch_id: int = 0,
+    head_id: int = 0,
+    q_token_id: int = 0,
+    causal: bool,
+    window_size: tuple[int, int] | None,
+) -> None:
+    q_start = cu_seqlens_q[batch_id].item()
+    q_end = cu_seqlens_q[batch_id + 1].item()
+    q_len = q_end - q_start
+    kv_len = seqused_k[batch_id].item()
+    block_size = k_cache.shape[1]
+    q_row = q[q_start + q_token_id, head_id].float()
+    phy_block_ids = [block_table[batch_id][seq_id // block_size] for seq_id in range(kv_len)]
+    offsets = [seq_id % block_size for seq_id in range(kv_len)]
+    k_dense = k_cache[phy_block_ids, offsets, head_id].float()
+    v_dense = v_cache[phy_block_ids, offsets, head_id].float()
+
+    cur_win = window_size
+    if cur_win is None or cur_win == (-1, -1):
+        cur_win = (kv_len, kv_len)
+    if causal:
+        cur_win = (cur_win[0], 0)
+    k_q_offset = kv_len - q_len
+    left = max(0, q_token_id + k_q_offset - cur_win[0])
+    right = min(kv_len, q_token_id + k_q_offset + 1 + cur_win[1])
+
+    scores = k_dense.matmul(q_row) / float(q.shape[2] ** 0.5)
+    window_scores = scores[left:right]
+    probs = window_scores.softmax(0)
+    out = probs.unsqueeze(0).matmul(v_dense[left:right]).squeeze(0)
+
+    print(
+        f"[DEBUG REF] batch={batch_id} head={head_id} q={q_token_id} "
+        f"range=[{left},{right})"
+    )
+    print("[DEBUG REF] scores[:4]:", window_scores[:4])
+    print("[DEBUG REF] probs[:4]:", probs[:4])
+    print("[DEBUG REF] out[:4]:", out[:4])
+
+
 def _require_fa2_cuda() -> None:
     # These tests are intended as black-box parity checks against the
     # official FA2 implementation, so we only run when CUDA + FA2 are visible.
@@ -378,6 +426,19 @@ def _assert_close_with_block_cu(
         window_size=window_size,
         block_table=block_table,
     )
+    _debug_compare_reference_window(
+        q=q,
+        k_cache=k_cache,
+        v_cache=v_cache,
+        cu_seqlens_q=cu_seqlens_q,
+        seqused_k=seqused_k,
+        block_table=block_table,
+        batch_id=0,
+        head_id=0,
+        q_token_id=0,
+        causal=causal,
+        window_size=window_size,
+    )
     out_cu = _run_toy_with_block_cu(
         q=q,
         k_cache=k_cache,
@@ -520,6 +581,83 @@ class FlashAttentionFuncCuKernelParityTest(unittest.TestCase):
             causal=False,
             window_size=None,
         )
+
+    def test_with_block_cu_known_negative_non_64_case(self) -> None:
+        # Keep a small negative probe outside the 64-dim regression matrix.
+        with self.assertRaises(AssertionError):
+            _assert_close_with_block_cu(
+                q_lens=[3, 5],
+                k_lens=None,
+                causal=False,
+                window_size=None,
+                head_dim=16,
+            )
+
+
+class FlashAttentionFuncCuKernelHeadDim64RegressionTest(unittest.TestCase):
+    def setUp(self) -> None:
+        _require_cuda()
+
+    def test_with_block_cu_head_dim_64_tail_aligned_causal_local_window_regression(self) -> None:
+        _assert_close_with_block_cu(
+            q_lens=[4, 9],
+            k_lens=[8, 12],
+            causal=True,
+            window_size=(3, 0),
+            head_dim=64,
+            dtype=torch.bfloat16,
+            seed=1,
+        )
+
+    def test_with_block_cu_head_dim_64_regression_matrix(self) -> None:
+        cases = [
+            {
+                "q_lens": [2, 6],
+                "k_lens": None,
+                "causal": False,
+                "window_size": None,
+                "seed": 0,
+            },
+            {
+                "q_lens": [2, 6],
+                "k_lens": None,
+                "causal": True,
+                "window_size": None,
+                "seed": 0,
+            },
+            {
+                "q_lens": [2, 6],
+                "k_lens": None,
+                "causal": True,
+                "window_size": (2, 0),
+                "seed": 0,
+            },
+            {
+                "q_lens": [1, 7],
+                "k_lens": None,
+                "causal": False,
+                "window_size": None,
+                "seed": 1,
+            },
+            {
+                "q_lens": [3, 5],
+                "k_lens": [6, 9],
+                "causal": True,
+                "window_size": None,
+                "seed": 0,
+            },
+        ]
+        for case in cases:
+            with self.subTest(case=case):
+                _assert_close_with_block_cu(
+                    q_lens=case["q_lens"],
+                    k_lens=case["k_lens"],
+                    causal=case["causal"],
+                    window_size=case["window_size"],
+                    head_dim=64,
+                    dtype=torch.bfloat16,
+                    seed=case["seed"],
+                )
 
     def test_with_block_cu_matches_python_tail_aligned_suffix_query_bf16(self) -> None:
         _assert_close_with_block_cu(

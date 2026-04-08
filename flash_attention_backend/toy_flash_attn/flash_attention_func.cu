@@ -1,7 +1,16 @@
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <string>
-// #define DEBUG_NUMERIC
+#define DEBUG_NUMERIC
+
+namespace {
+constexpr int kDebugBatchId = 0;
+constexpr int kDebugHeadId = 0;
+constexpr int kDebugQTokenId = 0;
+constexpr int kDebugChunkId = 0;
+constexpr int kDebugWindowElems = 4;
+constexpr int kDebugOutElems = 4;
+}
 
 
 __device__ inline float check_nan_val(float x, const char* tag) {
@@ -143,6 +152,23 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
     }
     int64_t absolute_range_right = min(kv_seqlen, kv_seqlen - history_offset + window_size_right); // 开区间
     int64_t absolute_range_left = max(int64_t{0}, kv_seqlen - 1 - history_offset - window_size_left);
+#ifdef DEBUG_NUMERIC
+    if (threadIdx.x == 0 && q_token_id < q_seqlen) {
+        printf(
+            "range batch=%lld head=%lld q=%lld q_len=%lld kv_len=%lld hist=%lld left=%lld right=%lld win=(%lld,%lld)\n",
+            (long long)batch_id,
+            (long long)head_id,
+            (long long)q_token_id,
+            (long long)q_seqlen,
+            (long long)kv_seqlen,
+            (long long)history_offset,
+            (long long)absolute_range_left,
+            (long long)absolute_range_right,
+            (long long)window_size_left,
+            (long long)window_size_right
+        );
+    }
+#endif
     for (int chunk_id = 0; 
             chunk_id < (absolute_range_right - absolute_range_left + kv_seq_chunk_size - 1) / kv_seq_chunk_size; 
             chunk_id++) 
@@ -196,6 +222,23 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
             }
         }
         __syncthreads();
+ #ifdef DEBUG_NUMERIC
+        if (batch_id == kDebugBatchId && head_id == kDebugHeadId &&
+            q_token_id == kDebugQTokenId && chunk_id == kDebugChunkId &&
+            threadIdx.x == 0) {
+            for (int i = 0; i < min(window_chunk_size, kDebugWindowElems); ++i) {
+                printf(
+                    "kernel_score batch=%lld head=%lld q=%lld idx=%d kv=%lld score=%f\n",
+                    (long long)batch_id,
+                    (long long)head_id,
+                    (long long)q_token_id,
+                    i,
+                    (long long)(absolute_range_left + chunk_id * window_chunk_size + i),
+                    (float)tile_softmax[threadIdx.y * window_chunk_size + i]
+                );
+            }
+        }
+#endif
         
         if (threadIdx.x < window_chunk_size) {
             // init tile_softmax_m
@@ -292,6 +335,23 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
                 "softmax");
         }
         __syncthreads();
+#ifdef DEBUG_NUMERIC
+        if (batch_id == kDebugBatchId && head_id == kDebugHeadId &&
+            q_token_id == kDebugQTokenId && chunk_id == kDebugChunkId &&
+            threadIdx.x == 0) {
+            for (int i = 0; i < min(window_chunk_size, kDebugWindowElems); ++i) {
+                printf(
+                    "kernel_prob batch=%lld head=%lld q=%lld idx=%d kv=%lld prob=%f\n",
+                    (long long)batch_id,
+                    (long long)head_id,
+                    (long long)q_token_id,
+                    i,
+                    (long long)(absolute_range_left + chunk_id * window_chunk_size + i),
+                    (float)tile_softmax[threadIdx.y * window_chunk_size + i]
+                );
+            }
+        }
+#endif
 
 
         // scalar_t old_sum = (q_token_id < q_seqlen) ? tile_old_softmax_sum[threadIdx.y]: scalar_t(0);
@@ -305,6 +365,25 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
         scalar_t merge_m = (q_token_id < q_seqlen) ? static_cast<scalar_t>(max(new_m, old_m)) : neg_inf;
         scalar_t merge_sum = (q_token_id < q_seqlen) ? static_cast<scalar_t>(old_sum * __expf(safe_sub(old_m, merge_m)) 
                                                                             + new_sum * __expf(safe_sub(new_m, merge_m))) : scalar_t(0);
+#ifdef DEBUG_NUMERIC
+        if (threadIdx.x == 0 && q_token_id < q_seqlen) {
+            printf(
+                "state batch=%lld head=%lld q=%lld chunk=%d old_m=%f old_sum=%f new_m=%f new_sum=%f merge_m=%f merge_sum=%f range=[%lld,%lld)\n",
+                (long long)batch_id,
+                (long long)head_id,
+                (long long)q_token_id,
+                chunk_id,
+                (float)old_m,
+                (float)old_sum,
+                (float)new_m,
+                (float)new_sum,
+                (float)merge_m,
+                (float)merge_sum,
+                (long long)absolute_range_left,
+                (long long)absolute_range_right
+            );
+        }
+#endif
 
         // tile matmul P @ V
         if (virt_kv_token_id < absolute_range_right && threadIdx.x < head_dim) {   // 转置读入，方便后续对位相乘
@@ -357,6 +436,20 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
                     e = scalar_t(e * softmax_div(old_sum, merge_sum) * __expf(safe_sub(old_m, merge_m)) + result * softmax_div(new_sum, merge_sum) 
                         * __expf(safe_sub(new_m, merge_m)));
                     tile_out[threadIdx.y * head_dim + vt_tile_row_id] = e;
+#ifdef DEBUG_NUMERIC
+                    if (batch_id == kDebugBatchId && head_id == kDebugHeadId &&
+                        q_token_id == kDebugQTokenId && chunk_id == kDebugChunkId &&
+                        vt_tile_row_id < kDebugOutElems) {
+                        printf(
+                            "kernel_out batch=%lld head=%lld q=%lld dim=%d accum=%f\n",
+                            (long long)batch_id,
+                            (long long)head_id,
+                            (long long)q_token_id,
+                            vt_tile_row_id,
+                            (float)e
+                        );
+                    }
+#endif
                 }
             }
         }
@@ -374,6 +467,7 @@ __global__ void flash_attn_varlen_with_block_kernel_v2(
     }
 }
 
+template<typename scalar_t>
 torch::Tensor flash_attn_varlen_with_block_v2(
     torch::Tensor q,
     torch::Tensor k,
@@ -419,12 +513,12 @@ torch::Tensor flash_attn_varlen_with_block_v2(
                     block.y * head_dim +
                     block.y * block.y;
 
-    flash_attn_varlen_with_block_kernel_v2<at::BFloat16><<<grid, block, sizeof(at::BFloat16) * tile_size>>>(
-        q.const_data_ptr<at::BFloat16>(),
+    flash_attn_varlen_with_block_kernel_v2<scalar_t><<<grid, block, sizeof(scalar_t) * tile_size>>>(
+        q.const_data_ptr<scalar_t>(),
         q.stride(0), q.stride(1), q.stride(2),
-        k.const_data_ptr<at::BFloat16>(),
+        k.const_data_ptr<scalar_t>(),
         k.stride(0), k.stride(1), k.stride(2), k.stride(3),
-        v.const_data_ptr<at::BFloat16>(),
+        v.const_data_ptr<scalar_t>(),
         v.stride(0), v.stride(1), v.stride(2), v.stride(3),
         max_seqlen_q,
         cu_seqlens_q.const_data_ptr<int32_t>(),
@@ -438,7 +532,7 @@ torch::Tensor flash_attn_varlen_with_block_v2(
         k.size(2),
         q.size(2),
         k.size(1),
-        out.data_ptr<at::BFloat16>()
+        out.data_ptr<scalar_t>()
     );
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;
@@ -446,5 +540,5 @@ torch::Tensor flash_attn_varlen_with_block_v2(
 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("flash_attn_varlen_with_block", &flash_attn_varlen_with_block_v2, "flash attn varlen with block");
+    m.def("flash_attn_varlen_with_block", &flash_attn_varlen_with_block_v2<float>, "flash attn varlen with block");
 }
