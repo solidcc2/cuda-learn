@@ -8,6 +8,7 @@
 #define toy_flash_attn_assert(x) ((void)0)
 #endif
 
+// grid(batch_id, q_token_chunk_id, head_id)
 template<typename scalar_t, typename inner_scalar_t>
 struct FlashAttnTrait {
     struct ParamSet {
@@ -36,15 +37,13 @@ struct FlashAttnTrait {
         int64_t kv_chunk_size;
 
         __device__ inline int64_t batch_size() const {
-            toy_flash_attn_assert(gridDim.z % num_heads == 0);
-            return gridDim.z / num_heads;
+            return gridDim.x;
         }
         __device__ inline int64_t batch_id() const {
             return blockIdx.x;
-            return blockIdx.z / num_heads;
         }
         __device__ inline int64_t head_id() const {
-            return blockIdx.z % num_heads;
+            return blockIdx.z;
         }
         __device__ inline int64_t q_seqlen() const {
             const int64_t bid = batch_id();
@@ -55,12 +54,11 @@ struct FlashAttnTrait {
         }
         
         // q_token_id bound with threadIdx.y
-        __device__ inline q_token_id() const {
-            const int64_t global_id = blockIdx.y * blockDim.y + threadIdx.y;
-            toy_flash_attn_assert(global_id > param.cu_seqlens_q[param.batch_id()])
-            return global_id - param.cu_seqlens_q[param.batch_id()];
+        __device__ inline int64_t q_token_id() const {
+            const int64_t idx = blockIdx.y * blockDim.y + threadIdx.y;
+            return idx;
         }
-        __device__ inline scalar_t q_idx(int64_t q_token_id, int64_t head_pos) const {
+        __device__ inline scalar_t q_at(int64_t q_token_id, int64_t head_pos) const {
             toy_flash_attn_assert(q_token_id >= 0 && q_token_id < q_seqlen());
             toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim);
             return q[
@@ -69,7 +67,7 @@ struct FlashAttnTrait {
                 q_stride[2] * head_pos
             ];
         }
-        __device__ inline scalar_t& out_idx(int64_t out_token_id, int64_t head_pos) const {
+        __device__ inline scalar_t& out_at(int64_t out_token_id, int64_t head_pos) const {
             toy_flash_attn_assert(out_token_id >= 0 && out_token_id < q_seqlen());
             toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim);
             return out[
@@ -143,22 +141,22 @@ struct FlashAttnTrait {
             return layout;
         }
 
-        __device__ inline scalar_t& q_idx(int64_t token_off, int64_t head_pos) {
+        __device__ inline scalar_t& q_at(int64_t token_off, int64_t head_pos) {
             toy_flash_attn_assert(token_off >= 0 && token_off < q_chunk_size);
             toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim);
             return q[head_dim * token_off + head_pos];
         }
-        __device__ inline scalar_t& k_idx(int64_t seq_off, int64_t head_pos) {
+        __device__ inline scalar_t& k_at(int64_t seq_off, int64_t head_pos) {
             toy_flash_attn_assert(seq_off >= 0 && seq_off < kv_chunk_size);
             toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim);
             return k[head_dim * seq_off + head_pos];
         }
-        __device__ inline scalar_t& v_idx(int64_t seq_off, int64_t head_pos) {
+        __device__ inline scalar_t& v_at(int64_t seq_off, int64_t head_pos) {
             toy_flash_attn_assert(seq_off >= 0 && seq_off < kv_chunk_size);
             toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim);
             return v[head_dim * seq_off + head_pos];
         }
-        __device__ inline scalar_t& out_idx(int64_t token_off, int64_t head_pos) {
+        __device__ inline scalar_t& out_at(int64_t token_off, int64_t head_pos) {
             toy_flash_attn_assert(token_off >= 0 && token_off < q_chunk_size);
             toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim);
             return out[head_dim * token_off + head_pos];
@@ -192,11 +190,16 @@ struct FlashAttnTrait {
         extern __shared__ char smem[];
         TileLayout layout = TileLayout::builder(smem, param.q_chunk_size, param.kv_chunk_size, param.head_dim);
         // load q chunk
-        toy_flash_attn_assert(param.q_chunk_size < blockDim.y);
-        toy_flash_attn_assert(param.head_dim < blockDim.x);
+        toy_flash_attn_assert(param.q_chunk_size <= blockDim.y);
+        toy_flash_attn_assert(param.head_dim <= blockDim.x);
 
         if (threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim) {
-            layout.q_idx() = param.q_at(param.q_token_id(), threadIdx.x);
+            if (param.q_token_id() < param.q_seqlen()) {
+                layout.q_at(threadIdx.y , threadIdx.x) = param.q_at(param.q_token_id(), threadIdx.x);
+            } else {
+                layout.q_at(threadIdx.y , threadIdx.x) = scalar_t(0);
+            }
         }
+        __syncthreads();
     };
 };
