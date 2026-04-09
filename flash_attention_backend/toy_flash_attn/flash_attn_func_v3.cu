@@ -1,3 +1,6 @@
+#include <__clang_cuda_builtin_vars.h>
+#include <__clang_cuda_math.h>
+#include <cstdint>
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <string>
@@ -113,60 +116,58 @@ struct FlashAttnTrait {
     };
 
     struct TileLayout {
-        static __device__ inline TileLayout builder(char* smem, 
-                                                int64_t q_chunk_size,
-                                                int64_t kv_chunk_size,
-                                                int64_t head_dim) {
-            TileLayout layout;
+        static __device__ inline TileLayout builder(char* smem, const ParamSet& param) {
+            TileLayout layout(param);
             int64_t offset = 0;
             layout.q = reinterpret_cast<scalar_t*>(smem + offset);
-            offset += (q_chunk_size * head_dim) * sizeof(scalar_t);
+            offset += (param.q_chunk_size * param.head_dim) * sizeof(scalar_t);
 
             layout.k = reinterpret_cast<scalar_t*>(smem + offset);
-            offset += (kv_chunk_size * head_dim) * sizeof(scalar_t);
+            offset += (param.kv_chunk_size * param.head_dim) * sizeof(scalar_t);
 
             layout.v = reinterpret_cast<scalar_t*>(smem + offset);
-            offset += (kv_chunk_size * head_dim) * sizeof(scalar_t);
+            offset += (param.kv_chunk_size * param.head_dim) * sizeof(scalar_t);
 
             layout.out = reinterpret_cast<scalar_t*>(smem + offset);
-            offset += (q_chunk_size * head_dim) * sizeof(scalar_t);
+            offset += (param.q_chunk_size * param.head_dim) * sizeof(scalar_t);
             
             // TODO
             // align
-
-            layout.q_chunk_size = q_chunk_size;
-            layout.kv_chunk_size = kv_chunk_size;
-            layout.head_dim = head_dim;
             
             return layout;
         }
 
         __device__ inline scalar_t& q_at(int64_t token_off, int64_t head_pos) {
-            toy_flash_attn_assert(token_off >= 0 && token_off < q_chunk_size);
-            toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim);
-            return q[head_dim * token_off + head_pos];
+            toy_flash_attn_assert(token_off >= 0 && token_off < param.q_chunk_size);
+            toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
+            return q[param.head_dim * token_off + head_pos];
         }
         __device__ inline scalar_t& k_at(int64_t seq_off, int64_t head_pos) {
-            toy_flash_attn_assert(seq_off >= 0 && seq_off < kv_chunk_size);
-            toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim);
-            return k[head_dim * seq_off + head_pos];
+            toy_flash_attn_assert(seq_off >= 0 && seq_off < param.kv_chunk_size);
+            toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
+            return k[param.head_dim * seq_off + head_pos];
         }
         __device__ inline scalar_t& v_at(int64_t seq_off, int64_t head_pos) {
-            toy_flash_attn_assert(seq_off >= 0 && seq_off < kv_chunk_size);
-            toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim);
-            return v[head_dim * seq_off + head_pos];
+            toy_flash_attn_assert(seq_off >= 0 && seq_off < param.kv_chunk_size);
+            toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
+            return v[param.head_dim * seq_off + head_pos];
         }
         __device__ inline scalar_t& out_at(int64_t token_off, int64_t head_pos) {
-            toy_flash_attn_assert(token_off >= 0 && token_off < q_chunk_size);
-            toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim);
-            return out[head_dim * token_off + head_pos];
+            toy_flash_attn_assert(token_off >= 0 && token_off < param.q_chunk_size);
+            toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
+            return out[param.head_dim * token_off + head_pos];
         }
-        // __device__ inline is_valid_kv(int64_t chunk_id, q_token_) {
-
-        // }
+        __device__ inline bool is_valid_kv(int64_t q_token_id, int64_t kv_seq_id, int64_t q_kv_offset, const int64_t* kv_win) {
+            const int64_t kv_axis = q_token_id - q_kv_offset;
+            const int64_t win[2] = {
+                max(int64_t(0), kv_axis - kv_win[0]),
+                min(param.kv_seqlen()-1, kv_axis + kv_win[1]),
+            };
+            return kv_seq_id >= win[0] && kv_seq_id <= win[1];
+        }
         
     private:
-        __device__ TileLayout() = default;
+        __device__ TileLayout(const ParamSet& p):param(p) {}
 
         scalar_t* q;
         scalar_t* k;
@@ -182,24 +183,41 @@ struct FlashAttnTrait {
         inner_scalar_t* last_chunk_sum;
         inner_scalar_t* last_chunk_softmax;
 
-        int64_t q_chunk_size;
-        int64_t kv_chunk_size;
-        int64_t head_dim;
+        const ParamSet& param;
     };
     static __global__ void kernel(ParamSet param) {
         extern __shared__ char smem[];
-        TileLayout layout = TileLayout::builder(smem, param.q_chunk_size, param.kv_chunk_size, param.head_dim);
+        TileLayout layout = TileLayout::builder(smem, param);
         // load q chunk
         toy_flash_attn_assert(param.q_chunk_size <= blockDim.y);
         toy_flash_attn_assert(param.head_dim <= blockDim.x);
 
         if (threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim) {
-            if (param.q_token_id() < param.q_seqlen()) {
-                layout.q_at(threadIdx.y , threadIdx.x) = param.q_at(param.q_token_id(), threadIdx.x);
-            } else {
-                layout.q_at(threadIdx.y , threadIdx.x) = scalar_t(0);
-            }
+            layout.q_at(threadIdx.y , threadIdx.x) = 
+                (param.q_token_id() < param.q_seqlen()) ? param.q_at(param.q_token_id(), threadIdx.x) : scalar_t(0);
+
         }
         __syncthreads();
+        const int64_t kv_win[2] = {
+            param.window_size[0] == -1 ? param.kv_seqlen() : param.window_size[0],
+            param.causal ? 0 : 
+                param.window_size[1] == -1 ? param.kv_seqlen() : param.window_size[1]
+        };
+        const int64_t q_kv_offset = param.q_seqlen() - param.kv_seqlen();
+
+        for(int64_t kv_chunk_id = 0; 
+                kv_chunk_id < (param.kv_seqlen() + param.kv_chunk_size - 1) / param.kv_chunk_size; kv_chunk_id++) {
+            
+            int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + threadIdx.y;
+            if (threadIdx.y < param.kv_chunk_size && threadIdx.x < param.head_dim) {
+                layout.k_at(threadIdx.y , threadIdx.x) = 
+                    (kv_seq_id < param.kv_seqlen()) ? param.k_at(kv_seq_id, threadIdx.x) : scalar_t(0);
+            }
+            __syncthreads();
+
+            // Q K matmul
+
+            
+        }
     };
 };

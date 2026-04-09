@@ -5,6 +5,7 @@
 ## Dev Log
 ### 20260409
 开始写第三版本, 这版本开始注意定义入参param struct, tile layout, 定义充足的安全函数，accessor降低心智负担。
+1. 完成ParamSet定义，TileLayout定义，并实现一组accessor & 断言，保证访问正确。完成q tile & k tile load
 
 ### 20260408
 定位执行推理可以得到结果不一致的原因，原因是q_tile每次读取8个q row, k_tile每次读取8个k row,此时处理时滑动窗口出错。退化到每次只处理1个row时，问题消解。但是还存在问题。现阶段排查下来已经遇到的问题包括：
