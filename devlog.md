@@ -3,6 +3,9 @@
 写一个触发大量bank conflict的代码，并nsys查看效果
 
 ## Dev Log
+###20260410
+增加layout对qk_matmul_reduction 和score_reduction两个临时tile以及accessor, 增加q k全局id到tile内的映射accessor, 完成qk矩阵乘法部分。增加严格的数值检查。
+
 ### 20260409
 开始写第三版本, 这版本开始注意定义入参param struct, tile layout, 定义充足的安全函数，accessor降低心智负担。
 1. 完成ParamSet定义，TileLayout定义，并实现一组accessor & 断言，保证访问正确。完成q tile & k tile load
