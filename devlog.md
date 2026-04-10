@@ -4,7 +4,8 @@
 
 ## Dev Log
 ###20260410
-增加layout对qk_matmul_reduction 和score_reduction两个临时tile以及accessor, 增加q k全局id到tile内的映射accessor, 完成qk矩阵乘法部分。增加严格的数值检查。
+1. 增加layout对qk_matmul_reduction 和score_reduction两个临时tile以及accessor, 增加q k全局id到tile内的映射accessor, 完成qk矩阵乘法部分。增加严格的数值检查。
+2. flash_attn_func_v3.cu重构了shared memory layout、QK分块归约、非有限值检查，并开始接入online softmax初始化。
 
 ### 20260409
 开始写第三版本, 这版本开始注意定义入参param struct, tile layout, 定义充足的安全函数，accessor降低心智负担。
