@@ -237,10 +237,17 @@ struct FlashAttnTrait {
             toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
             return k[param.head_dim * seq_off + head_pos];
         }
-        __device__ inline scalar_t& v_at(int64_t seq_off, int64_t head_pos) {
+        // __device__ inline scalar_t& v_at(int64_t seq_off, int64_t head_pos) {
+        //     toy_flash_attn_assert(seq_off >= 0 && seq_off < param.kv_chunk_size);
+        //     toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
+        //     return v[param.head_dim * seq_off + head_pos];
+        // }
+
+        // v 提供转置读取接口，方便和softmax结果对齐，都是行对位相乘，列统一为kv_chunk_off
+        __device__ inline scalar_t& v_t_at(int64_t head_pos, int64_t seq_off) {
             toy_flash_attn_assert(seq_off >= 0 && seq_off < param.kv_chunk_size);
             toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
-            return v[param.head_dim * seq_off + head_pos];
+            return v[param.kv_chunk_size * head_pos + seq_off];
         }
         __device__ inline scalar_t& out_at(int64_t token_off, int64_t head_pos) {
             toy_flash_attn_assert(token_off >= 0 && token_off < param.q_chunk_size);
@@ -341,11 +348,13 @@ struct FlashAttnTrait {
         };
         const int64_t q_kv_offset = param.q_seqlen() - param.kv_seqlen();
 
+        // TODO: kv_chunk的有效边界是远大于win size的，这里可以剪枝
         for(int64_t kv_chunk_id = 0; 
                 kv_chunk_id < (param.kv_seqlen() + param.kv_chunk_size - 1) / param.kv_chunk_size; kv_chunk_id++) {
             {   // kv_seq_id 作用域 for k tile load
                 int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + threadIdx.y;
-                if (threadIdx.y < param.kv_chunk_size && threadIdx.x < param.head_dim) {
+                bool valid_thread = threadIdx.y < param.kv_chunk_size && threadIdx.x < param.head_dim;
+                if (valid_thread) {
                     layout.k_at(threadIdx.y , threadIdx.x) = 
                         (kv_seq_id < param.kv_seqlen()) ? param.k_at(kv_seq_id, threadIdx.x) : scalar_t(0);
                 }
@@ -353,17 +362,14 @@ struct FlashAttnTrait {
             }
 
             // Q K matmul
-
             for(int kv_chunk_off = 0; kv_chunk_off <param.kv_chunk_size; kv_chunk_off ++) {
                 int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + kv_chunk_off;
-                bool valid_q_kv_pair = layout.is_valid_kv(param.q_token_id(), kv_seq_id, q_kv_offset, kv_win);  // 提前，没有做线程坐标安全校验
                 if (threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim) {
                     if (param.q_token_id() < param.q_seqlen()) {
                         scalar_t q_elem = layout.q_in_tile(param.q_token_id(), threadIdx.x);
                         scalar_t k_elem = layout.k_in_tile(kv_seq_id, kv_chunk_id, threadIdx.x);
-                        // 注： 这里理论上可以根据valid窗口，在对位乘时就置位为neg_inf, 从而减少后续的win有效性判别。但是可能污染后续逻辑，先不动。
                         layout.qk_matmul_reduction_at(threadIdx.y, threadIdx.x) = 
-                            check_non_finite_val(valid_q_kv_pair? q_elem * k_elem: scalar_t(0), "qk_dot");
+                            check_non_finite_val(q_elem * k_elem, "qk_dot");
                     } else {
                         layout.qk_matmul_reduction_at(threadIdx.y, threadIdx.x) = scalar_t(0);
                     }
@@ -392,6 +398,8 @@ struct FlashAttnTrait {
                     val = check_non_finite_val(val + __shfl_down_sync(0xffffffff, val, 2), "qk_warp_reduction");
                     val = check_non_finite_val(val + __shfl_down_sync(0xffffffff, val, 1), "qk_warp_reduction");
                     if (threadIdx.x == 0) {
+                        bool valid_q_kv_pair = 
+                            param.q_token_id() < param.q_seqlen() && layout.is_valid_kv(param.q_token_id(), kv_seq_id, q_kv_offset, kv_win);
                         layout.score_reduction_at(threadIdx.y, kv_chunk_off) = valid_q_kv_pair ? 
                             check_non_finite_val(static_cast<inner_scalar_t>(val) / sqrt((double)param.head_dim), "score") : inner_neg_inf;
                     }
@@ -497,9 +505,17 @@ struct FlashAttnTrait {
                     layout.softmax_reduction_at(threadIdx.y, threadIdx.x) = softmax;
                 }
                 __syncthreads();
-
             }
-
+            {   // load V
+                bool valid_thread = threadIdx.y < param.kv_chunk_size && threadIdx.x < param.head_dim;
+                int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + threadIdx.y;
+                if (valid_thread) {
+                    layout.v_t_at(threadIdx.x , threadIdx.y) = 
+                        (kv_seq_id < param.kv_seqlen()) ?
+                            param.v_at(kv_seq_id, threadIdx.x) : scalar_t(0);
+                }
+                __syncthreads();
+            }
         }
     };
 }; 
