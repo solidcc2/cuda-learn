@@ -331,14 +331,14 @@ struct FlashAttnTrait {
 
             for(int kv_chunk_off = 0; kv_chunk_off <param.kv_chunk_size; kv_chunk_off ++) {
                 int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + kv_chunk_off;
+                bool valid_q_kv_pair = layout.is_valid_kv(param.q_token_id(), kv_seq_id, q_kv_offset, kv_win);  // 提前，没有做线程坐标安全校验
                 if (threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim) {
                     if (param.q_token_id() < param.q_seqlen()) {
-                        layout.qk_matmul_reduction_at(threadIdx.y, threadIdx.x) = check_non_finite_val(
-                            layout.is_valid_kv(param.q_token_id(), kv_seq_id, q_kv_offset, kv_win) ?
-                                    layout.q_in_tile(param.q_token_id(), threadIdx.x) *
-                                    layout.k_in_tile(kv_seq_id, kv_chunk_id, threadIdx.x) 
-                                : scalar_t(0),
-                        "qk_dot");
+                        scalar_t q_elem = layout.q_in_tile(param.q_token_id(), threadIdx.x);
+                        scalar_t k_elem = layout.k_in_tile(kv_seq_id, kv_chunk_id, threadIdx.x);
+                        // 注： 这里理论上可以根据valid窗口，在对位乘时就置位为neg_inf, 从而减少后续的win有效性判别。但是可能污染后续逻辑，先不动。
+                        layout.qk_matmul_reduction_at(threadIdx.y, threadIdx.x) = 
+                            check_non_finite_val(valid_q_kv_pair? q_elem * k_elem: scalar_t(0), "qk_dot");
                     } else {
                         layout.qk_matmul_reduction_at(threadIdx.y, threadIdx.x) = scalar_t(0);
                     }
@@ -367,8 +367,8 @@ struct FlashAttnTrait {
                     val = check_non_finite_val(val + __shfl_down_sync(0xffffffff, val, 2), "qk_warp_reduction");
                     val = check_non_finite_val(val + __shfl_down_sync(0xffffffff, val, 1), "qk_warp_reduction");
                     if (threadIdx.x == 0) {
-                        layout.score_reduction_at(threadIdx.y, kv_chunk_off) = 
-                            check_non_finite_val(static_cast<inner_scalar_t>(val) / sqrt((double)param.head_dim), "score");
+                        layout.score_reduction_at(threadIdx.y, kv_chunk_off) = valid_q_kv_pair ? 
+                            check_non_finite_val(static_cast<inner_scalar_t>(val) / sqrt((double)param.head_dim), "score") : inner_neg_inf;
                     }
                 } while(0);
             }
@@ -376,13 +376,11 @@ struct FlashAttnTrait {
                 // online softmax
                 bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.kv_chunk_size;
                 if(valid_thread) {     // load tile
-                    int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + threadIdx.x;
-                    bool is_valid_kv = layout.is_valid_kv(param.q_token_id(), kv_seq_id, q_kv_offset, kv_win);
-
                     layout.max_reduction_at(threadIdx.y, threadIdx.x) = 
-                        is_valid_kv ? layout.score_reduction_at(threadIdx.y, threadIdx.x) : inner_neg_inf;
+                        layout.score_reduction_at(threadIdx.y, threadIdx.x);
                     layout.sum_reduction_at(threadIdx.y, threadIdx.x) = 
-                        is_valid_kv ? inner_scalar_t(1.0) : inner_scalar_t(0.0);
+                        layout.score_reduction_at(threadIdx.y, threadIdx.x) != inner_neg_inf ?
+                                inner_scalar_t(1.0) : inner_scalar_t(0.0);
                 }
                 __syncthreads();
 
@@ -393,7 +391,7 @@ struct FlashAttnTrait {
                 int32_t bound = ceil_pow2_u32(param.kv_chunk_size) / 2;
                 for(; bound >= warpSize; bound /= 2) {  // block reduction
                     if (threadIdx.x < bound && threadIdx.y < param.q_chunk_size) {
-                        bool valid_neighbor = threadIdx.x + bound < param.q_chunk_size && threadIdx.y < param.q_chunk_size;
+                        bool valid_neighbor = threadIdx.x + bound < param.kv_chunk_size && threadIdx.y < param.q_chunk_size;
                         inner_scalar_t max_neighbor = valid_neighbor ?
                             layout.max_reduction_at(threadIdx.y, threadIdx.x + bound) : inner_neg_inf;
                         inner_scalar_t sum_neighbor = valid_neighbor ? 
