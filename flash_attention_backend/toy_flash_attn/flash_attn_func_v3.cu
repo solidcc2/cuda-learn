@@ -228,16 +228,10 @@ struct FlashAttnTrait {
             return out[param.head_dim * token_off + head_pos];
         }
 
-        // tile视角
         __device__ inline scalar_t& qk_matmul_reduction_at(int64_t token_off, int64_t head_pos) {
             toy_flash_attn_assert(token_off >= 0 && token_off < param.q_chunk_size);
             toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
             return qk_matmul_reduction[param.head_dim * token_off + head_pos];
-        }
-        // thread block视角，完成无效thread补齐
-        __device__ inline scalar_t qk_matmul_reduction_block_at(int64_t y, int64_t x) {
-            return (y < param.q_chunk_size && x < param.head_dim) ? 
-                qk_matmul_reduction_at(y, x) : scalar_t(0);
         }
 
         __device__ inline inner_scalar_t& score_reduction_at(int64_t token_off, int64_t seq_off) {
@@ -351,12 +345,15 @@ struct FlashAttnTrait {
                 }
                 
                 do {     // while(0) 范围控制 line sum reduction
-                    scalar_t val = layout.qk_matmul_reduction_block_at(threadIdx.y, threadIdx.x);
+                    bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim;
+
+                    scalar_t val = valid_thread ? layout.qk_matmul_reduction_at(threadIdx.y, threadIdx.x) : scalar_t(0);
                     // block归约
                     int32_t bound = ceil_pow2_u32(param.head_dim) / 2;
                     for(; bound >= warpSize; bound /= 2) {
                         if (threadIdx.x < bound && threadIdx.y < param.q_chunk_size) {
-                            scalar_t neighbor = layout.qk_matmul_reduction_block_at(threadIdx.y, threadIdx.x + bound);
+                            bool valid_pos = threadIdx.y < param.q_chunk_size && threadIdx.x + bound < param.head_dim;
+                            scalar_t neighbor = valid_pos ? layout.qk_matmul_reduction_at(threadIdx.y, threadIdx.x + bound) : scalar_t(0);
                             val = check_non_finite_val(val+neighbor, "qk_block_reduction");
                             layout.qk_matmul_reduction_at(threadIdx.y, threadIdx.x) = val;
                         }
