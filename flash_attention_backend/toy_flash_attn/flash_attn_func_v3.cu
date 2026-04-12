@@ -26,7 +26,7 @@ __device__ inline scalar_t check_nan_val(scalar_t x, const char* tag) {
 #ifdef DEBUG_NUMERIC
     if (isnan(x)) {
         printf("%s nan: %f tx=%d ty=%d bx=%d by=%d bz=%d\n",
-            tag, x, threadIdx.x, threadIdx.y, blockIdx.x, blockIdx.y, blockIdx.z);
+            tag, static_cast<double>(x), threadIdx.x, threadIdx.y, blockIdx.x, blockIdx.y, blockIdx.z);
     }
 #endif
     return x;
@@ -37,11 +37,21 @@ __device__ inline scalar_t check_non_finite_val(scalar_t x, const char* tag) {
 #ifdef DEBUG_NUMERIC
     if (!isfinite(x)) {
         printf("%s non-finite: %f tx=%d ty=%d bx=%d by=%d bz=%d\n",
-               tag, x, threadIdx.x, threadIdx.y, blockIdx.x, blockIdx.y, blockIdx.z);
+               tag, static_cast<double>(x), threadIdx.x, threadIdx.y, blockIdx.x, blockIdx.y, blockIdx.z);
     }
 #endif
     return x;
 }
+
+template<typename scalar_t, typename inner_scalar_t>
+struct FlashAttnTrait;
+
+template<typename scalar_t, typename inner_scalar_t>
+__global__ void kernel_wrapper(
+    typename FlashAttnTrait<scalar_t, inner_scalar_t>::ParamSet param) {
+    FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(param);
+}
+
 
 __host__ __device__ inline uint32_t ceil_pow2_u32(uint32_t x) {
     if (x <= 1) return 1;
@@ -73,13 +83,14 @@ __device__ inline scalar_t softmax_div(scalar_t a, scalar_t b) {
 // grid(batch_id, q_token_chunk_id, head_id)
 template<typename scalar_t, typename inner_scalar_t>
 struct FlashAttnTrait {
-    static const inner_scalar_t inner_neg_inf =
+    inline static constexpr inner_scalar_t inner_neg_inf =
         -std::numeric_limits<inner_scalar_t>::infinity();
 
+
     struct ParamSet {
-        scalar_t* q;    // total_q x num_heads x head_dim
-        scalar_t* k;    // num_blocks x block_size x num_kv_heads x head_dim
-        scalar_t* v;
+        const scalar_t* q;    // total_q x num_heads x head_dim
+        const scalar_t* k;    // num_blocks x block_size x num_kv_heads x head_dim
+        const scalar_t* v;
         scalar_t* out;   // assert out_layout == q_layout
         union {
             int64_t q_stride[3];  
@@ -88,11 +99,11 @@ struct FlashAttnTrait {
         int64_t k_stride[4];
         int64_t v_stride[4];
         int64_t max_seqlen_q;
-        int32_t* cu_seqlens_q;  // batch_size + 1
+        const int32_t* cu_seqlens_q;  // batch_size + 1
         int64_t max_seqlen_k;
-        int32_t* seqused_k;     // batch_size
+        const int32_t* seqused_k;     // batch_size
         int64_t window_size[2];
-        int32_t* block_table;
+        const int32_t* block_table;
         int64_t bt_stride[2];
         int64_t num_heads;
         int64_t head_dim;
@@ -178,7 +189,21 @@ struct FlashAttnTrait {
     };
 
     struct TileLayout {
-        static __device__ __host__ inline TileLayout builder(char* smem, const ParamSet& param) {
+        static __device__ inline TileLayout builder(char* smem, const ParamSet& param) {
+            auto layout = layout_init(smem, param);
+            toy_flash_attn_assert(smem != nullptr);
+            bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim;
+            if (valid_thread) {
+                layout.out_at(threadIdx.y, threadIdx.x) = scalar_t(0);
+                if (threadIdx.x == 0) {
+                    layout.last_chunk_max_at(threadIdx.y) = inner_neg_inf;
+                    layout.last_chunk_sum_at(threadIdx.y) = inner_scalar_t(0);
+                }
+            }
+            return layout;
+        }
+
+        static __host__ __device__ inline TileLayout layout_init(char* smem, const ParamSet& param) {
             TileLayout layout(param);
             int64_t offset = 0;
             layout.q = reinterpret_cast<scalar_t*>(smem + offset);
@@ -234,23 +259,11 @@ struct FlashAttnTrait {
 
             offset = round_up(offset, alignof(inner_scalar_t));
             layout._size = offset;
-
-            if (smem != nullptr) {
-                bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim;
-                if (valid_thread) {
-                    layout.out_at(threadIdx.y, threadIdx.x) = scalar_t(0);
-                    if (threadIdx.x == 0) {
-                        layout.last_chunk_max_at(threadIdx.y) = inner_neg_inf;
-                        layout.last_chunk_sum_at(threadIdx.y) = inner_scalar_t(0);
-                    }
-                }
-            }
-            
             return layout;
         }
 
         static __host__ inline size_t size(const ParamSet& param) {
-            TileLayout layout = builder((char*)nullptr, param);
+            TileLayout layout = layout_init((char*)nullptr, param);
             return layout._size;
         }
 
@@ -370,7 +383,7 @@ struct FlashAttnTrait {
 
         const ParamSet& param;
     };
-    static __global__ void kernel(ParamSet param) {
+    static __device__ void kernel(ParamSet& param) {
         extern __shared__ char smem[];
         TileLayout layout = TileLayout::builder(smem, param);
         // load q chunk
@@ -696,23 +709,23 @@ struct FlashAttnTrait {
 
         int block_row = 8;  // 先写死调试用
         dim3 block(head_dim, block_row);
-        dim3 grid(num_heads, (max_seqlen_q + block_row - 1)/block_row, batch_size);
+        dim3 grid(batch_size, (max_seqlen_q + block_row - 1)/block_row, num_heads);
 
         ParamSet param = {
             .q = q.const_data_ptr<scalar_t>(),
             .k = k.const_data_ptr<scalar_t>(),
             .v = v.const_data_ptr<scalar_t>(),
             .out = out.data_ptr<scalar_t>(),
-            .q_stride = {q.size(0), q.size(1), q.size(2)},
-            .k_stride = {k.size(0), k.size(1), k.size(2), k.size(3)},
-            .v_stride = {v.size(0), v.size(1), v.size(2), v.size(3)},
+            .q_stride = {q.stride(0), q.stride(1), q.stride(2)},
+            .k_stride = {k.stride(0), k.stride(1), k.stride(2), k.stride(3)},
+            .v_stride = {v.stride(0), v.stride(1), v.stride(2), v.stride(3)},
             .max_seqlen_q = max_seqlen_q,
             .cu_seqlens_q = cu_seqlens_q.const_data_ptr<int32_t>(),
             .max_seqlen_k = max_seqlen_k,
             .seqused_k = seqused_k.const_data_ptr<int32_t>(),
             .window_size = {window_size_left, window_size_right},
             .block_table = block_table.const_data_ptr<int32_t>(),
-            .bt_stride = {block_table.size(0), block_table.size(1)},
+            .bt_stride = {block_table.stride(0), block_table.stride(1)},
             .num_heads = num_heads,
             .head_dim = head_dim,
             .block_size = block_size,
@@ -720,13 +733,12 @@ struct FlashAttnTrait {
             .q_chunk_size = block_row,
             .kv_chunk_size = block_row
         };
-        kernel<<<grid, block, TileLayout::size(param)>>>(param);
+        kernel_wrapper<scalar_t, inner_scalar_t><<<grid, block, TileLayout::size(param)>>>(param);
 
         C10_CUDA_KERNEL_LAUNCH_CHECK();
         return out;
     }
 }; 
-
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // m.def("flash_attn_varlen_with_block_bf16", &flash_attn_varlen_with_block_v2<at::BFloat16>, "flash attn varlen with block");
