@@ -54,7 +54,7 @@ def _check_cuda_tensor(
 _ops = load(
     name="toy_torch_flash_attention_func",
     sources=[
-        str(_THIS_DIR / "flash_attention_func.cu"),
+        str(_THIS_DIR / "flash_attn_func_v3.cu"),
     ],
     extra_cflags=["-O2"],
     extra_cuda_cflags=["-O2"],
@@ -247,7 +247,7 @@ def flash_attn_varlen_with_block_cu(
     v = v.to(dtype=torch.float32)
     out = out.to(dtype=torch.float32)
 
-    out = _ops.flash_attn_varlen_with_block_fp32(q, k, v, 
+    out = _ops.flash_attn_varlen_with_block_v3(q, k, v, 
                                     max_seqlen_q, cu_seqlens_q,
                                     max_seqlen_k, seqused_k,
                                     causal, window_size[0], window_size[1],

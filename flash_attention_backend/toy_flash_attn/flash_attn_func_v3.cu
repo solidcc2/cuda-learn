@@ -1,7 +1,8 @@
-#include <__clang_cuda_builtin_vars.h>
-#include <__clang_cuda_cmath.h>
-#include <__clang_cuda_math.h>
-#include <__clang_cuda_math_forward_declares.h>
+// #include "torch/headeronly/util/BFloat16.h"
+// #include <__clang_cuda_builtin_vars.h>
+// #include <__clang_cuda_cmath.h>
+// #include <__clang_cuda_math.h>
+// #include <__clang_cuda_math_forward_declares.h>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -646,4 +647,89 @@ struct FlashAttnTrait {
             }
         }
     };
+
+    static void check_inputs(
+        torch::Tensor q,
+        torch::Tensor k,
+        torch::Tensor v,
+        int64_t max_seqlen_q,
+        torch::Tensor cu_seqlens_q,
+        int64_t max_seqlen_k,
+        torch::Tensor seqused_k,
+        bool causal,
+        int64_t window_size_left, 
+        int64_t window_size_right,
+        torch::Tensor block_table,
+        torch::Tensor out) {
+
+        TORCH_CHECK(q.sizes() == out.sizes(), "q and out must have the same shape");
+        TORCH_CHECK(q.size(1) == k.size(2), "GQA not support, num_head must equal num_kv_head");
+    } 
+
+    static torch::Tensor flash_attn_varlen_with_block(
+        torch::Tensor q,
+        torch::Tensor k,
+        torch::Tensor v,
+        int64_t max_seqlen_q,
+        torch::Tensor cu_seqlens_q,
+        int64_t max_seqlen_k,
+        torch::Tensor seqused_k,
+        bool causal,
+        int64_t window_size_left, 
+        int64_t window_size_right,
+        torch::Tensor block_table,
+        torch::Tensor out
+    ){    
+        check_inputs(q, k, v, 
+            max_seqlen_q, cu_seqlens_q,
+            max_seqlen_k, seqused_k,
+            causal,
+            window_size_left, window_size_right,
+            block_table, 
+            out);
+        int head_dim = q.size(2);
+        auto batch_size = seqused_k.size(0);
+        auto num_heads = q.size(1);
+        int64_t block_size = k.size(1);
+
+        assert(head_dim <= 128);        // 泛化
+
+        int block_row = 8;  // 先写死调试用
+        dim3 block(head_dim, block_row);
+        dim3 grid(num_heads, (max_seqlen_q + block_row - 1)/block_row, batch_size);
+
+        ParamSet param = {
+            .q = q.const_data_ptr<scalar_t>(),
+            .k = k.const_data_ptr<scalar_t>(),
+            .v = v.const_data_ptr<scalar_t>(),
+            .out = out.data_ptr<scalar_t>(),
+            .q_stride = {q.size(0), q.size(1), q.size(2)},
+            .k_stride = {k.size(0), k.size(1), k.size(2), k.size(3)},
+            .v_stride = {v.size(0), v.size(1), v.size(2), v.size(3)},
+            .max_seqlen_q = max_seqlen_q,
+            .cu_seqlens_q = cu_seqlens_q.const_data_ptr<int32_t>(),
+            .max_seqlen_k = max_seqlen_k,
+            .seqused_k = seqused_k.const_data_ptr<int32_t>(),
+            .window_size = {window_size_left, window_size_right},
+            .block_table = block_table.const_data_ptr<int32_t>(),
+            .bt_stride = {block_table.size(0), block_table.size(1)},
+            .num_heads = num_heads,
+            .head_dim = head_dim,
+            .block_size = block_size,
+            .causal = causal,
+            .q_chunk_size = block_row,
+            .kv_chunk_size = block_row
+        };
+        kernel<<<grid, block, TileLayout::size(param)>>>(param);
+
+        C10_CUDA_KERNEL_LAUNCH_CHECK();
+        return out;
+    }
 }; 
+
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+    // m.def("flash_attn_varlen_with_block_bf16", &flash_attn_varlen_with_block_v2<at::BFloat16>, "flash attn varlen with block");
+    m.def("flash_attn_varlen_with_block_v3", &FlashAttnTrait<at::BFloat16, float>::flash_attn_varlen_with_block, "flash attn varlen with block");
+}
+
