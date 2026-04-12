@@ -3,6 +3,12 @@
 写一个触发大量bank conflict的代码，并nsys查看效果
 
 ## Dev Log
+### 20260411
+1. 移除qk_matmul_reduction_block_at的抽象，有点过度抽象，逻辑有效性还是应该在上下文中就近体现。
+2. 优化部分呢mask计算逻辑
+3. 完成block online softmax归约
+4. 取消qk步骤的有效窗口判定，统一到score录入过程中完成，完成v tile载入。
+
 ###20260410
 1. 增加layout对qk_matmul_reduction 和score_reduction两个临时tile以及accessor, 增加q k全局id到tile内的映射accessor, 完成qk矩阵乘法部分。增加严格的数值检查。
 2. flash_attn_func_v3.cu重构了shared memory layout、QK分块归约、非有限值检查，并开始接入online softmax初始化。
