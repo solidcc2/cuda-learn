@@ -5,7 +5,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
-// #include <cassert>
+#include <cassert>
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <string>
@@ -199,6 +199,14 @@ struct FlashAttnTrait {
             layout.qk_matmul_reduction = reinterpret_cast<scalar_t*>(smem + offset);
             offset += (param.q_chunk_size * param.head_dim) * sizeof(scalar_t);
 
+            offset = round_up(offset, alignof(scalar_t));
+            layout.sv_matmul_reduction = reinterpret_cast<scalar_t*>(smem + offset);
+            offset += (param.q_chunk_size * param.kv_chunk_size) * sizeof(scalar_t);
+
+            offset = round_up(offset, alignof(scalar_t));
+            layout.out_reduction = reinterpret_cast<scalar_t*>(smem + offset);
+            offset += (param.q_chunk_size * param.head_dim) * sizeof(scalar_t);
+
             offset = round_up(offset, alignof(inner_scalar_t));
             layout.score_reduction = reinterpret_cast<inner_scalar_t*>(smem + offset);
             offset += (param.q_chunk_size * param.kv_chunk_size) * sizeof(inner_scalar_t);
@@ -216,7 +224,26 @@ struct FlashAttnTrait {
             offset += (param.q_chunk_size * param.kv_chunk_size) * sizeof(inner_scalar_t);
 
             offset = round_up(offset, alignof(inner_scalar_t));
+            layout.last_chunk_max = reinterpret_cast<inner_scalar_t*>(smem + offset);
+            offset += (param.q_chunk_size * 1) * sizeof(inner_scalar_t);
+            
+            offset = round_up(offset, alignof(inner_scalar_t));
+            layout.last_chunk_sum = reinterpret_cast<inner_scalar_t*>(smem + offset);
+            offset += (param.q_chunk_size * 1) * sizeof(inner_scalar_t);
+
+            offset = round_up(offset, alignof(inner_scalar_t));
             layout._size = offset;
+
+            if (smem != nullptr) {
+                bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim;
+                if (valid_thread) {
+                    layout.out_at(threadIdx.y, threadIdx.x) = scalar_t(0);
+                    if (threadIdx.x == 0) {
+                        layout.last_chunk_max_at(threadIdx.y) = inner_neg_inf;
+                        layout.last_chunk_sum_at(threadIdx.y) = inner_scalar_t(0);
+                    }
+                }
+            }
             
             return layout;
         }
@@ -237,13 +264,8 @@ struct FlashAttnTrait {
             toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
             return k[param.head_dim * seq_off + head_pos];
         }
-        // __device__ inline scalar_t& v_at(int64_t seq_off, int64_t head_pos) {
-        //     toy_flash_attn_assert(seq_off >= 0 && seq_off < param.kv_chunk_size);
-        //     toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
-        //     return v[param.head_dim * seq_off + head_pos];
-        // }
 
-        // v 提供转置读取接口，方便和softmax结果对齐，都是行对位相乘，列统一为kv_chunk_off
+        // v 提供转置读取接口，方便和softmax结果对齐，都是行对位相乘，列统一为kv_chunk_off, 内存布局更友好
         __device__ inline scalar_t& v_t_at(int64_t head_pos, int64_t seq_off) {
             toy_flash_attn_assert(seq_off >= 0 && seq_off < param.kv_chunk_size);
             toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
@@ -259,6 +281,18 @@ struct FlashAttnTrait {
             toy_flash_attn_assert(token_off >= 0 && token_off < param.q_chunk_size);
             toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
             return qk_matmul_reduction[param.head_dim * token_off + head_pos];
+        }
+
+        __device__ inline scalar_t& sv_matmul_reduction_at(int64_t token_off, int64_t seq_off) {
+            toy_flash_attn_assert(token_off >= 0 && token_off < param.q_chunk_size);
+            toy_flash_attn_assert(seq_off >= 0 && seq_off < param.kv_chunk_size);
+            return sv_matmul_reduction[param.kv_chunk_size * token_off + seq_off];
+        }
+
+        __device__ inline scalar_t& out_reduction_at(int64_t token_off, int64_t head_pos) {
+            toy_flash_attn_assert(token_off >= 0 && token_off < param.q_chunk_size);
+            toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
+            return out_reduction[param.head_dim * token_off + head_pos];
         }
 
         __device__ inline inner_scalar_t& score_reduction_at(int64_t token_off, int64_t seq_off) {
@@ -280,6 +314,16 @@ struct FlashAttnTrait {
             toy_flash_attn_assert(token_off >= 0 && token_off < param.q_chunk_size);
             toy_flash_attn_assert(seq_off >= 0 && seq_off < param.kv_chunk_size);
             return softmax_reduction[param.kv_chunk_size * token_off + seq_off];
+        }
+
+        __device__ inline inner_scalar_t& last_chunk_max_at(int64_t token_off) {
+            toy_flash_attn_assert(token_off >= 0 && token_off < param.q_chunk_size);
+            return last_chunk_max[token_off];
+        }
+
+        __device__ inline inner_scalar_t& last_chunk_sum_at(int64_t token_off) {
+            toy_flash_attn_assert(token_off >= 0 && token_off < param.q_chunk_size);
+            return last_chunk_sum[token_off];
         }
 
         __device__ inline bool is_valid_kv(int64_t q_token_id, int64_t kv_seq_id, int64_t q_kv_offset, const int64_t* kv_win) {
@@ -310,6 +354,8 @@ struct FlashAttnTrait {
         scalar_t* out;
 
         scalar_t* qk_matmul_reduction;
+        scalar_t* sv_matmul_reduction;
+        scalar_t* out_reduction;
 
         // inner for softmax
         inner_scalar_t* score_reduction;
@@ -318,7 +364,6 @@ struct FlashAttnTrait {
         inner_scalar_t* softmax_reduction;  // 理论上可以和score_reduction复用，但是性能差别不大，这部分shared占用不是瓶颈，先分开使逻辑清晰
         inner_scalar_t* last_chunk_max;
         inner_scalar_t* last_chunk_sum;
-        inner_scalar_t* last_chunk_softmax;
 
         size_t _size;
 
@@ -493,7 +538,7 @@ struct FlashAttnTrait {
                         layout.max_reduction_at(threadIdx.y, 0) = max_;
                         layout.sum_reduction_at(threadIdx.y, 0) = sum_;
                     }
-                }
+                } 
                 __syncthreads();
                 if (valid_thread) { // block 广播max & sum, 回填softmax
                     inner_scalar_t max_ = layout.max_reduction_at(threadIdx.y, 0);
@@ -515,6 +560,89 @@ struct FlashAttnTrait {
                             param.v_at(kv_seq_id, threadIdx.x) : scalar_t(0);
                 }
                 __syncthreads();
+            }
+            for(int64_t head_off = 0; head_off < param.head_dim; head_off++) {
+                // TODO: 这里可以提高并行度， softmax chunk通常比较小(q_chunk_size * kv_chunk_size) = （8 * 8）,head dim比较大(64/128)
+                bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.kv_chunk_size;
+                if (valid_thread) {
+                    inner_scalar_t s = layout.softmax_reduction_at(threadIdx.y, threadIdx.x);
+                    scalar_t v = layout.v_t_at(head_off, threadIdx.x);
+                    scalar_t val = check_non_finite_val(s * v, "softmax_mul_v");
+                    layout.sv_matmul_reduction_at(threadIdx.y, threadIdx.x) = val;
+                }
+                __syncthreads();
+
+                {   // softmax dot V block reduction
+                    int64_t bound = ceil_pow2_u32(param.kv_chunk_size)/2;
+                    scalar_t out = valid_thread ? layout.sv_matmul_reduction_at(threadIdx.y, threadIdx.x) : scalar_t(0);
+                    for(; bound >= warpSize; bound /= 2) {  // unlikely逻辑， 这里大概率不会走到
+                        if (threadIdx.x < bound && threadIdx.y < param.q_chunk_size) {
+                            scalar_t out_neighbor = (threadIdx.x + bound < param.kv_chunk_size) ? 
+                                layout.sv_matmul_reduction_at(threadIdx.y, threadIdx.x + bound) : scalar_t(0);
+                            out = check_non_finite_val(out + out_neighbor, "out_reduction_block");
+                            layout.sv_matmul_reduction_at(threadIdx.y, threadIdx.x) = out;
+                        }
+                        __syncthreads();
+                    }
+                    // softmax dot V warp reduction
+                    if (threadIdx.x < warpSize && threadIdx.y < param.q_chunk_size) {
+                        scalar_t out_neighbor;
+                        out_neighbor = __shfl_down_sync(0xffffffff, out, 16);
+                        out = check_non_finite_val(out + out_neighbor, "out_reduction_warp");
+
+                        out_neighbor = __shfl_down_sync(0xffffffff, out, 8);
+                        out = check_non_finite_val(out + out_neighbor, "out_reduction_warp");
+
+                        out_neighbor = __shfl_down_sync(0xffffffff, out, 4);
+                        out = check_non_finite_val(out + out_neighbor, "out_reduction_warp");
+
+                        out_neighbor = __shfl_down_sync(0xffffffff, out, 2);
+                        out = check_non_finite_val(out + out_neighbor, "out_reduction_warp");
+
+                        out_neighbor = __shfl_down_sync(0xffffffff, out, 1);
+                        out = check_non_finite_val(out + out_neighbor, "out_reduction_warp");
+                        
+                        if (threadIdx.x == 0) {
+                            layout.out_reduction_at(threadIdx.y, head_off) = out;
+                        }
+                    }
+                    __syncthreads();
+                }
+            }
+
+            {   // out reduction
+                bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim;
+                inner_scalar_t merge_m, merge_sum;
+                if (valid_thread) {
+                    inner_scalar_t old_e = inner_scalar_t(layout.out_at(threadIdx.y, threadIdx.x));
+                    inner_scalar_t new_e = inner_scalar_t(layout.out_reduction_at(threadIdx.y, threadIdx.x));
+                    inner_scalar_t old_m = layout.last_chunk_max_at(threadIdx.y);
+                    inner_scalar_t old_sum = layout.last_chunk_sum_at(threadIdx.y);
+                    inner_scalar_t new_m = layout.max_reduction_at(threadIdx.y, 0);
+                    inner_scalar_t new_sum = layout.sum_reduction_at(threadIdx.y, 0);
+                    merge_m = max(old_m, new_m);
+                    merge_sum = check_non_finite_val(
+                            old_sum * __expf(check_nan_val(softmax_sub(old_m, merge_m), "softmax_chunk_reduction_sum_old_sub")) + 
+                            new_sum * __expf(check_nan_val(softmax_sub(new_m, merge_m), "softmax_chunk_reduction_sum_new_sub"))
+                        , "softmax_chunk_reduction_sum");
+                    inner_scalar_t merge_e = check_non_finite_val(
+                            old_e * softmax_div(old_sum, merge_sum) * __expf(check_nan_val(softmax_sub(old_m, merge_m), "out_chunk_reduction_old_sub")) +
+                            new_e * softmax_div(new_sum, merge_sum) * __expf(check_nan_val(softmax_sub(new_m, merge_m), "out_chunk_reduction_new_sub"))  
+                        , "out_chunk_reduction");
+                    layout.out_at(threadIdx.y, threadIdx.x) = merge_e;
+                }
+                __syncthreads();
+                if (valid_thread && threadIdx.x == 0) {
+                    layout.last_chunk_max_at(threadIdx.y) = merge_m;
+                    layout.last_chunk_sum_at(threadIdx.y) = merge_sum;
+                }
+            }
+            __syncthreads();
+        } 
+        {   // write back out
+            bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim;
+            if (param.q_token_id() < param.q_seqlen() && valid_thread) {
+                param.out_at(param.q_token_id(), threadIdx.x) = layout.out_at(threadIdx.y, threadIdx.x);
             }
         }
     };
