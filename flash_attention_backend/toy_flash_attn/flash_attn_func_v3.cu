@@ -190,7 +190,7 @@ struct FlashAttnTrait {
             toy_flash_attn_assert(smem != nullptr);
             bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim;
             if (valid_thread) {
-                layout.out_at(threadIdx.y, threadIdx.x) = scalar_t(0);
+                layout.out_at(threadIdx.y, threadIdx.x) = inner_scalar_t(0);
                 if (threadIdx.x == 0) {
                     layout.last_chunk_max_at(threadIdx.y) = inner_scalar_t(-INFINITY);
                     layout.last_chunk_sum_at(threadIdx.y) = inner_scalar_t(0);
@@ -213,21 +213,21 @@ struct FlashAttnTrait {
             layout.v = reinterpret_cast<scalar_t*>(smem + offset);
             offset += (param.kv_chunk_size * param.head_dim) * sizeof(scalar_t);
 
-            offset = round_up(offset, alignof(scalar_t));
-            layout.out = reinterpret_cast<scalar_t*>(smem + offset);
-            offset += (param.q_chunk_size * param.head_dim) * sizeof(scalar_t);
+            offset = round_up(offset, alignof(inner_scalar_t));
+            layout.out = reinterpret_cast<inner_scalar_t*>(smem + offset);
+            offset += (param.q_chunk_size * param.head_dim) * sizeof(inner_scalar_t);
             
             offset = round_up(offset, alignof(scalar_t));
             layout.qk_matmul_reduction = reinterpret_cast<scalar_t*>(smem + offset);
             offset += (param.q_chunk_size * param.head_dim) * sizeof(scalar_t);
 
-            offset = round_up(offset, alignof(scalar_t));
-            layout.sv_matmul_reduction = reinterpret_cast<scalar_t*>(smem + offset);
-            offset += (param.q_chunk_size * param.kv_chunk_size) * sizeof(scalar_t);
+            offset = round_up(offset, alignof(inner_scalar_t));
+            layout.sv_matmul_reduction = reinterpret_cast<inner_scalar_t*>(smem + offset);
+            offset += (param.q_chunk_size * param.kv_chunk_size) * sizeof(inner_scalar_t);
 
-            offset = round_up(offset, alignof(scalar_t));
-            layout.out_reduction = reinterpret_cast<scalar_t*>(smem + offset);
-            offset += (param.q_chunk_size * param.head_dim) * sizeof(scalar_t);
+            offset = round_up(offset, alignof(inner_scalar_t));
+            layout.out_reduction = reinterpret_cast<inner_scalar_t*>(smem + offset);
+            offset += (param.q_chunk_size * param.head_dim) * sizeof(inner_scalar_t);
 
             offset = round_up(offset, alignof(inner_scalar_t));
             layout.score_reduction = reinterpret_cast<inner_scalar_t*>(smem + offset);
@@ -281,7 +281,7 @@ struct FlashAttnTrait {
             toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
             return v[param.kv_chunk_size * head_pos + seq_off];
         }
-        __device__ inline scalar_t& out_at(int64_t token_off, int64_t head_pos) {
+        __device__ inline inner_scalar_t& out_at(int64_t token_off, int64_t head_pos) {
             toy_flash_attn_assert(token_off >= 0 && token_off < param.q_chunk_size);
             toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
             return out[param.head_dim * token_off + head_pos];
@@ -293,13 +293,13 @@ struct FlashAttnTrait {
             return qk_matmul_reduction[param.head_dim * token_off + head_pos];
         }
 
-        __device__ inline scalar_t& sv_matmul_reduction_at(int64_t token_off, int64_t seq_off) {
+        __device__ inline inner_scalar_t& sv_matmul_reduction_at(int64_t token_off, int64_t seq_off) {
             toy_flash_attn_assert(token_off >= 0 && token_off < param.q_chunk_size);
             toy_flash_attn_assert(seq_off >= 0 && seq_off < param.kv_chunk_size);
             return sv_matmul_reduction[param.kv_chunk_size * token_off + seq_off];
         }
 
-        __device__ inline scalar_t& out_reduction_at(int64_t token_off, int64_t head_pos) {
+        __device__ inline inner_scalar_t& out_reduction_at(int64_t token_off, int64_t head_pos) {
             toy_flash_attn_assert(token_off >= 0 && token_off < param.q_chunk_size);
             toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
             return out_reduction[param.head_dim * token_off + head_pos];
@@ -361,11 +361,11 @@ struct FlashAttnTrait {
         scalar_t* q;
         scalar_t* k;
         scalar_t* v;
-        scalar_t* out;
+        inner_scalar_t* out;
 
         scalar_t* qk_matmul_reduction;
-        scalar_t* sv_matmul_reduction;
-        scalar_t* out_reduction;
+        inner_scalar_t* sv_matmul_reduction;
+        inner_scalar_t* out_reduction;
 
         // inner for softmax
         inner_scalar_t* score_reduction;
@@ -618,19 +618,19 @@ struct FlashAttnTrait {
                 bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.kv_chunk_size;
                 if (valid_thread) {
                     inner_scalar_t s = layout.softmax_reduction_at(threadIdx.y, threadIdx.x);
-                    scalar_t v = layout.v_t_at(head_off, threadIdx.x);
-                    scalar_t val = check_non_finite_val(s * v, "softmax_mul_v");
+                    inner_scalar_t v = layout.v_t_at(head_off, threadIdx.x);
+                    inner_scalar_t val = check_non_finite_val(s * v, "softmax_mul_v");
                     layout.sv_matmul_reduction_at(threadIdx.y, threadIdx.x) = val;
                 }
                 __syncthreads();
 
                 {   // softmax dot V block reduction
                     int64_t bound = ceil_pow2_u32(param.kv_chunk_size)/2;
-                    scalar_t out = valid_thread ? layout.sv_matmul_reduction_at(threadIdx.y, threadIdx.x) : scalar_t(0);
+                    inner_scalar_t out = valid_thread ? layout.sv_matmul_reduction_at(threadIdx.y, threadIdx.x) : inner_scalar_t(0);
                     for(; bound >= warpSize; bound /= 2) {  // unlikely逻辑， 这里大概率不会走到
                         if (threadIdx.x < bound && threadIdx.y < param.q_chunk_size) {
-                            scalar_t out_neighbor = (threadIdx.x + bound < param.kv_chunk_size) ? 
-                                layout.sv_matmul_reduction_at(threadIdx.y, threadIdx.x + bound) : scalar_t(0);
+                            inner_scalar_t out_neighbor = (threadIdx.x + bound < param.kv_chunk_size) ? 
+                                layout.sv_matmul_reduction_at(threadIdx.y, threadIdx.x + bound) : inner_scalar_t(0);
                             out = check_non_finite_val(out + out_neighbor, "out_reduction_block");
                             layout.sv_matmul_reduction_at(threadIdx.y, threadIdx.x) = out;
                         }
@@ -638,7 +638,7 @@ struct FlashAttnTrait {
                     }
                     // softmax dot V warp reduction
                     if (threadIdx.x < warpSize && threadIdx.y < param.q_chunk_size) {
-                        scalar_t out_neighbor;
+                        inner_scalar_t out_neighbor;
                         out_neighbor = __shfl_down_sync(0xffffffff, out, 16);
                         out = check_non_finite_val(out + out_neighbor, "out_reduction_warp");
 
@@ -729,7 +729,7 @@ struct FlashAttnTrait {
         {   // write back out
             bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim;
             if (param.q_token_id() < param.q_seqlen() && valid_thread) {
-                param.out_at(param.q_token_id(), threadIdx.x) = layout.out_at(threadIdx.y, threadIdx.x);
+                param.out_at(param.q_token_id(), threadIdx.x) = scalar_t(layout.out_at(threadIdx.y, threadIdx.x));
             }
         }
     };
