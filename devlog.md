@@ -13,6 +13,10 @@
 7. 充分的c++ {}block, 减少变量作用域，便于尽早收敛错误。
 
 ## Dev Log
+### 20260413
+1. 解决flash_attention_func_test.py单测问题，原因是qk乘时少了一次__syncthreads(); vllm集成测试仍有问题。
+2. 增加调试宏和调试打印。测试case暂时屏蔽headdim < 32的case,防止blockDim.x >=32 的断言不通过。
+
 ### 20260412
 1. 确定分阶段处理原则，flash attn的三阶段有效性判别原则，load到归约tile时做有效性判别，无效数值/边界做计算友好填充，计算时忽略有效性。写回tile时做有效性判别,只做线程块边界判别。
 2. 完成kernel v3版本主体，完成kernel launcher, 编译通过，flash_attention_func_test.py单测还有问题。

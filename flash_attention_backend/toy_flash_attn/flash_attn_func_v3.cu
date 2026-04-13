@@ -14,6 +14,7 @@
 
 # define TOY_FLASH_ATTN_ASSERT_ON
 # define DEBUG_NUMERIC
+// # define DEBUG_FLASH_ATTN_V3_TRACE
 
 #ifdef TOY_FLASH_ATTN_ASSERT_ON
 #define toy_flash_attn_assert(x) assert(x)
@@ -386,6 +387,12 @@ struct FlashAttnTrait {
     static __device__ void kernel(ParamSet& param) {
         extern __shared__ char smem[];
         TileLayout layout = TileLayout::builder(smem, param);
+#ifdef DEBUG_FLASH_ATTN_V3_TRACE
+        const bool debug_row =
+            param.batch_id() == 0 &&
+            param.head_id() == 0 &&
+            param.q_token_id() < 2;
+#endif
         // load q chunk
         toy_flash_attn_assert(param.q_chunk_size <= blockDim.y);
         toy_flash_attn_assert(param.kv_chunk_size <= blockDim.y);
@@ -433,6 +440,7 @@ struct FlashAttnTrait {
                         layout.qk_matmul_reduction_at(threadIdx.y, threadIdx.x) = scalar_t(0);
                     }
                 }
+                __syncthreads();
                 
                 do {     // while(0) 范围控制 line sum reduction
                     bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim;
@@ -459,6 +467,26 @@ struct FlashAttnTrait {
                     if (threadIdx.x == 0) {
                         bool valid_q_kv_pair = 
                             param.q_token_id() < param.q_seqlen() && layout.is_valid_kv(param.q_token_id(), kv_seq_id, q_kv_offset, kv_win);
+
+#ifdef DEBUG_FLASH_ATTN_V3_TRACE
+                        if (debug_row && threadIdx.y < param.q_chunk_size) {
+                            printf(
+                                "score_mask bid=%lld hid=%lld q=%lld kv=%lld qlen=%lld kvlen=%lld off=%lld "
+                                "win=(%lld,%lld) valid=%d val=%f\n",
+                                (long long)param.batch_id(),
+                                (long long)param.head_id(),
+                                (long long)param.q_token_id(),
+                                (long long)kv_seq_id,
+                                (long long)param.q_seqlen(),
+                                (long long)param.kv_seqlen(),
+                                (long long)q_kv_offset,
+                                (long long)kv_win[0],
+                                (long long)kv_win[1],
+                                (int)valid_q_kv_pair,
+                                (double)val
+                            );
+                        }
+#endif
                         layout.score_reduction_at(threadIdx.y, kv_chunk_off) = valid_q_kv_pair ? 
                             check_non_finite_val(static_cast<inner_scalar_t>(val) / sqrt((double)param.head_dim), "score") : inner_neg_inf;
                     }
@@ -554,6 +582,20 @@ struct FlashAttnTrait {
                     }
                 } 
                 __syncthreads();
+#ifdef DEBUG_FLASH_ATTN_V3_TRACE
+                if (debug_row && threadIdx.x == 0 && threadIdx.y < param.q_chunk_size) {
+                    printf(
+                        "chunk_softmax bid=%lld hid=%lld q=%lld chunk=%lld max=%f sum=%f\n",
+                        (long long)param.batch_id(),
+                        (long long)param.head_id(),
+                        (long long)param.q_token_id(),
+                        (long long)kv_chunk_id,
+                        (double)layout.max_reduction_at(threadIdx.y, 0),
+                        (double)layout.sum_reduction_at(threadIdx.y, 0)
+                    );
+                }
+#endif
+
                 if (valid_thread) { // block 广播max & sum, 回填softmax
                     inner_scalar_t max_ = layout.max_reduction_at(threadIdx.y, 0);
                     inner_scalar_t sum_ = layout.sum_reduction_at(threadIdx.y, 0);
@@ -618,6 +660,19 @@ struct FlashAttnTrait {
                         
                         if (threadIdx.x == 0) {
                             layout.out_reduction_at(threadIdx.y, head_off) = out;
+#ifdef DEBUG_FLASH_ATTN_V3_TRACE
+                            if (debug_row) {
+                                printf(
+                                    "sv_reduce bid=%lld hid=%lld q=%lld chunk=%lld head_off=%lld out=%f\n",
+                                    (long long)param.batch_id(),
+                                    (long long)param.head_id(),
+                                    (long long)param.q_token_id(),
+                                    (long long)kv_chunk_id,
+                                    (long long)head_off,
+                                    (double)out
+                                );
+                            }
+#endif
                         }
                     }
                     __syncthreads();
@@ -644,6 +699,28 @@ struct FlashAttnTrait {
                             new_e * softmax_div(new_sum, merge_sum) * __expf(check_nan_val(softmax_sub(new_m, merge_m), "out_chunk_reduction_new_sub"))  
                         , "out_chunk_reduction");
                     layout.out_at(threadIdx.y, threadIdx.x) = merge_e;
+#ifdef DEBUG_FLASH_ATTN_V3_TRACE
+                    if (debug_row && threadIdx.x == 0) {
+                        printf(
+                            "chunk_merge bid=%lld hid=%lld q=%lld chunk=%lld "
+                            "old_m=%f old_sum=%f new_m=%f new_sum=%f "
+                            "merge_m=%f merge_sum=%f old_e=%f new_e=%f merge_e=%f\n",
+                            (long long)param.batch_id(),
+                            (long long)param.head_id(),
+                            (long long)param.q_token_id(),
+                            (long long)kv_chunk_id,
+                            (double)old_m,
+                            (double)old_sum,
+                            (double)new_m,
+                            (double)new_sum,
+                            (double)merge_m,
+                            (double)merge_sum,
+                            (double)old_e,
+                            (double)new_e,
+                            (double)merge_e
+                        );
+                    }
+#endif
                 }
                 __syncthreads();
                 if (valid_thread && threadIdx.x == 0) {
@@ -700,6 +777,9 @@ struct FlashAttnTrait {
             window_size_left, window_size_right,
             block_table, 
             out);
+#ifdef DEBUG_FLASH_ATTN_V3_TRACE
+        printf("########### flash attn v3 ###############\n");
+#endif
         int head_dim = q.size(2);
         auto batch_size = seqused_k.size(0);
         auto num_heads = q.size(1);
@@ -744,4 +824,3 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     // m.def("flash_attn_varlen_with_block_bf16", &flash_attn_varlen_with_block_v2<at::BFloat16>, "flash attn varlen with block");
     m.def("flash_attn_varlen_with_block_v3", &FlashAttnTrait<at::BFloat16, float>::flash_attn_varlen_with_block, "flash attn varlen with block");
 }
-
