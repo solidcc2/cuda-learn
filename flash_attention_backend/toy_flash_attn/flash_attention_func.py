@@ -4,6 +4,7 @@ import os
 import torch
 
 from pathlib import Path
+from itertools import count
 
 from torch.utils.cpp_extension import load
 
@@ -11,6 +12,7 @@ _THIS_DIR = Path(__file__).resolve().parent
 
 _CUDA_VALUE_DTYPE = torch.bfloat16
 _CUDA_INDEX_DTYPE = torch.int32
+_DUMP_COUNTER = count()
 
 
 def _tensor_debug_str(name: str, tensor: torch.Tensor | None) -> str:
@@ -30,6 +32,31 @@ def _maybe_log_cuda_inputs(**tensors: torch.Tensor | None) -> None:
         ", ".join(_tensor_debug_str(name, tensor) for name, tensor in tensors.items()),
         flush=True,
     )
+
+
+def _clone_for_dump(value):
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().clone()
+    if isinstance(value, tuple):
+        return tuple(_clone_for_dump(item) for item in value)
+    if isinstance(value, list):
+        return [_clone_for_dump(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _clone_for_dump(item) for key, item in value.items()}
+    return value
+
+
+def _maybe_dump_flash_attn_context(op_name: str, **payload) -> None:
+    dump_dir = os.environ.get("TOY_FLASH_ATTN_DUMP_DIR")
+    if not dump_dir:
+        return
+
+    dump_path = Path(dump_dir).expanduser().resolve()
+    dump_path.mkdir(parents=True, exist_ok=True)
+    dump_id = next(_DUMP_COUNTER)
+    file_path = dump_path / f"{dump_id:05d}_{op_name}.pt"
+    torch.save(_clone_for_dump(payload), file_path)
+    print(f"[toy_flash_attn] dumped {op_name} context to {file_path}", flush=True)
 
 
 def _check_cuda_tensor(
@@ -133,6 +160,20 @@ def flash_attn_varlen_with_block(
         P = S.softmax(2)
         o = P.matmul(V.transpose(0, 1)).transpose(0, 1)
         out[q_range[0]:q_range[1]] = o
+    _maybe_dump_flash_attn_context(
+        "with_block",
+        q=q,
+        k=k,
+        v=v,
+        max_seqlen_q=max_seqlen_q,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_k=max_seqlen_k,
+        seqused_k=seqused_k,
+        causal=causal,
+        window_size=window_size,
+        block_table=block_table,
+        result=out,
+    )
     return out
         
     
@@ -218,7 +259,6 @@ def flash_attn_varlen_with_block_cu(
         block_table=block_table,
         out=out,
     )
-
     expected_device = q.device
     _check_cuda_tensor("q", q, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
     _check_cuda_tensor("k", k, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
@@ -242,10 +282,10 @@ def flash_attn_varlen_with_block_cu(
         expected_dtype=_CUDA_INDEX_DTYPE,
     )
     _check_cuda_tensor("out", out, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
-    # q = q.to(dtype=torch.float32)
-    # k = k.to(dtype=torch.float32)
-    # v = v.to(dtype=torch.float32)
-    # out = out.to(dtype=torch.float32)
+    q = q.to(dtype=torch.float32)
+    k = k.to(dtype=torch.float32)
+    v = v.to(dtype=torch.float32)
+    out = out.to(dtype=torch.float32)
 
     out = _ops.flash_attn_varlen_with_block_v3(q, k, v, 
                                     max_seqlen_q, cu_seqlens_q,
@@ -253,4 +293,18 @@ def flash_attn_varlen_with_block_cu(
                                     causal, window_size[0], window_size[1],
                                     block_table, 
                                     out)
+    _maybe_dump_flash_attn_context(
+        "with_block_cu",
+        q=q,
+        k=k,
+        v=v,
+        max_seqlen_q=max_seqlen_q,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_k=max_seqlen_k,
+        seqused_k=seqused_k,
+        causal=causal,
+        window_size=window_size,
+        block_table=block_table,
+        result=out,
+    )
     return out.to(dtype=_CUDA_VALUE_DTYPE)

@@ -1,4 +1,5 @@
 import unittest
+import os
 from importlib.util import module_from_spec, spec_from_file_location
 from pathlib import Path
 
@@ -86,6 +87,26 @@ def _require_fa2_cuda() -> None:
 def _require_cuda() -> None:
     if not torch.cuda.is_available():
         raise unittest.SkipTest("CUDA is required for this test.")
+
+
+def _require_dump_path_env() -> Path:
+    dump_path = os.environ.get("TOY_FLASH_ATTN_REPLAY_DUMP")
+    if not dump_path:
+        raise unittest.SkipTest(
+            "Set TOY_FLASH_ATTN_REPLAY_DUMP to a dumped .pt file or dump directory to run this replay test."
+        )
+    return Path(dump_path).expanduser().resolve()
+
+
+def _iter_replay_dump_paths(dump_path: Path) -> list[Path]:
+    if dump_path.is_file():
+        return [dump_path]
+    if dump_path.is_dir():
+        paths = sorted(dump_path.glob("*_with_block.pt"))
+        if not paths:
+            raise unittest.SkipTest(f"No *_with_block.pt dump files found in {dump_path}")
+        return paths
+    raise unittest.SkipTest(f"Replay dump path does not exist: {dump_path}")
 
 
 def _make_inputs(
@@ -505,6 +526,51 @@ def _assert_close_with_block_cu(
     print(f"[PASS] {case_desc}")
 
 
+def _assert_dump_replay_close(dump_path: Path) -> None:
+    payload = torch.load(dump_path, map_location="cpu")
+    q = payload["q"].cuda()
+    k = payload["k"].cuda()
+    v = payload["v"].cuda()
+    cu_seqlens_q = payload["cu_seqlens_q"].cuda()
+    seqused_k = payload["seqused_k"].cuda()
+    block_table = payload["block_table"].cuda()
+    out_ref = payload.get("result")
+    if out_ref is None:
+        out_ref = flash_attn_varlen_with_block(
+            q=q,
+            k=k,
+            v=v,
+            max_seqlen_q=payload["max_seqlen_q"],
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_k=payload["max_seqlen_k"],
+            seqused_k=seqused_k,
+            causal=payload["causal"],
+            window_size=payload["window_size"],
+            block_table=block_table,
+        ).detach().cpu()
+    out_ref = out_ref.cuda()
+    out_cu = flash_attn_varlen_with_block_cu(
+        q=q,
+        k=k,
+        v=v,
+        max_seqlen_q=payload["max_seqlen_q"],
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_k=payload["max_seqlen_k"],
+        seqused_k=seqused_k,
+        causal=payload["causal"],
+        window_size=payload["window_size"],
+        block_table=block_table,
+    )
+    diff = (out_cu.float() - out_ref.float()).abs()
+    print(f"[REPLAY] dump={dump_path}")
+    print("max diff:", diff.max().item())
+    print("mean diff:", diff.mean().item())
+    assert out_cu.shape == out_ref.shape
+    assert torch.allclose(out_cu, out_ref, atol=3e-2, rtol=3e-2), (
+        f"Mismatch when replaying dumped context from {dump_path}"
+    )
+
+
 class FlashAttentionFuncFa2ParityTest(unittest.TestCase):
     def setUp(self) -> None:
         _require_fa2_cuda()
@@ -723,6 +789,11 @@ class FlashAttentionFuncCuKernelHeadDim64RegressionTest(unittest.TestCase):
                     torch.isfinite(out_cu.float()).all().item(),
                     f"Non-finite values found in CUDA output for {case_desc}",
                 )
+
+    def test_with_block_cu_replay_dump_matches_python(self) -> None:
+        for dump_path in _iter_replay_dump_paths(_require_dump_path_env()):
+            with self.subTest(dump=str(dump_path)):
+                _assert_dump_replay_close(dump_path)
 
     # @unittest.expectedFailure
     def test_with_block_cu_head_dim_coverage_targets(self) -> None:

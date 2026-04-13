@@ -821,6 +821,6 @@ struct FlashAttnTrait {
 }; 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    // m.def("flash_attn_varlen_with_block_bf16", &flash_attn_varlen_with_block_v2<at::BFloat16>, "flash attn varlen with block");
-    m.def("flash_attn_varlen_with_block_v3", &FlashAttnTrait<at::BFloat16, float>::flash_attn_varlen_with_block, "flash attn varlen with block");
+    // m.def("flash_attn_varlen_with_block_v3", &FlashAttnTrait<at::BFloat16, float>::flash_attn_varlen_with_block, "flash attn varlen with block");
+    m.def("flash_attn_varlen_with_block_v3", &FlashAttnTrait<float, float>::flash_attn_varlen_with_block, "flash attn varlen with block");
 }
