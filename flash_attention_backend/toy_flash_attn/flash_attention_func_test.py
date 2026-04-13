@@ -20,6 +20,21 @@ flash_attn_varlen_without_block = _MOD.flash_attn_varlen_without_block
 flash_attn_varlen_with_block = _MOD.flash_attn_varlen_with_block
 flash_attn_varlen_with_block_cu = _MOD.flash_attn_varlen_with_block_cu
 
+_VLLM_MATCH_TOP10_WORST_DUMPS = [
+    "00263_with_block.pt",
+    "00303_with_block.pt",
+    "00195_with_block.pt",
+    "00009_with_block.pt",
+    "00147_with_block.pt",
+    "00339_with_block.pt",
+    "00375_with_block.pt",
+    "00123_with_block.pt",
+    "00371_with_block.pt",
+    "00357_with_block.pt",
+]
+
+_STEP0_REPLAY_DUMP = "00000_with_block.pt"
+
 
 def _debug_compare_reference_window(
     q: torch.Tensor,
@@ -107,6 +122,40 @@ def _iter_replay_dump_paths(dump_path: Path) -> list[Path]:
             raise unittest.SkipTest(f"No *_with_block.pt dump files found in {dump_path}")
         return paths
     raise unittest.SkipTest(f"Replay dump path does not exist: {dump_path}")
+
+
+def _resolve_named_dump_paths(base_dir: Path, filenames: list[str]) -> list[Path]:
+    if not base_dir.is_dir():
+        raise unittest.SkipTest(f"Replay dump base dir does not exist: {base_dir}")
+    paths = [base_dir / name for name in filenames]
+    missing = [str(path) for path in paths if not path.is_file()]
+    if missing:
+        raise unittest.SkipTest(
+            "Missing expected replay dump files:\n" + "\n".join(missing)
+        )
+    return paths
+
+
+def _require_replay_dump_payload(payload: dict, dump_path: Path) -> None:
+    required_keys = {
+        "q",
+        "k",
+        "v",
+        "max_seqlen_q",
+        "cu_seqlens_q",
+        "max_seqlen_k",
+        "seqused_k",
+        "causal",
+        "window_size",
+        "block_table",
+        "result",
+    }
+    missing = sorted(required_keys - payload.keys())
+    if missing:
+        raise AssertionError(
+            f"Replay dump {dump_path} is missing required keys: {missing}. "
+            "Please regenerate dumps with the current dump format."
+        )
 
 
 def _make_inputs(
@@ -528,27 +577,14 @@ def _assert_close_with_block_cu(
 
 def _assert_dump_replay_close(dump_path: Path) -> None:
     payload = torch.load(dump_path, map_location="cpu")
+    _require_replay_dump_payload(payload, dump_path)
     q = payload["q"].cuda()
     k = payload["k"].cuda()
     v = payload["v"].cuda()
     cu_seqlens_q = payload["cu_seqlens_q"].cuda()
     seqused_k = payload["seqused_k"].cuda()
     block_table = payload["block_table"].cuda()
-    out_ref = payload.get("result")
-    if out_ref is None:
-        out_ref = flash_attn_varlen_with_block(
-            q=q,
-            k=k,
-            v=v,
-            max_seqlen_q=payload["max_seqlen_q"],
-            cu_seqlens_q=cu_seqlens_q,
-            max_seqlen_k=payload["max_seqlen_k"],
-            seqused_k=seqused_k,
-            causal=payload["causal"],
-            window_size=payload["window_size"],
-            block_table=block_table,
-        ).detach().cpu()
-    out_ref = out_ref.cuda()
+    out_ref = payload["result"].cuda()
     out_cu = flash_attn_varlen_with_block_cu(
         q=q,
         k=k,
@@ -794,6 +830,21 @@ class FlashAttentionFuncCuKernelHeadDim64RegressionTest(unittest.TestCase):
         for dump_path in _iter_replay_dump_paths(_require_dump_path_env()):
             with self.subTest(dump=str(dump_path)):
                 _assert_dump_replay_close(dump_path)
+
+    def test_with_block_cu_replay_top10_vllm_worst_dumps(self) -> None:
+        dump_root = _require_dump_path_env()
+        if dump_root.is_file():
+            dump_root = dump_root.parent
+        for dump_path in _resolve_named_dump_paths(dump_root, _VLLM_MATCH_TOP10_WORST_DUMPS):
+            with self.subTest(dump=str(dump_path)):
+                _assert_dump_replay_close(dump_path)
+
+    def test_with_block_cu_replay_step0_matches_python(self) -> None:
+        dump_root = _require_dump_path_env()
+        if dump_root.is_file():
+            dump_root = dump_root.parent
+        dump_path = _resolve_named_dump_paths(dump_root, [_STEP0_REPLAY_DUMP])[0]
+        _assert_dump_replay_close(dump_path)
 
     # @unittest.expectedFailure
     def test_with_block_cu_head_dim_coverage_targets(self) -> None:

@@ -71,23 +71,18 @@ __host__ __device__ inline int64_t round_up(int64_t x, int64_t base) {
 // online softmax sub 只需要处理-inf
 template<typename scalar_t>
 __device__ inline scalar_t softmax_sub(scalar_t a, scalar_t b) { 
-    const scalar_t neg_inf = -std::numeric_limits<scalar_t>::infinity();
-    return (isfinite(a) && isfinite(b)) ? a - b : neg_inf;
+    return (isfinite(a) && isfinite(b)) ? a - b : scalar_t{-INFINITY};
 }
 
 // online softmax div 除0表示无效位
 template<typename scalar_t>
 __device__ inline scalar_t softmax_div(scalar_t a, scalar_t b) {
-    return (b != scalar_t(0)) ? a/b : 0.0;
+    return (b != scalar_t(0)) ? a/b : scalar_t{0};
 }
 
 // grid(batch_id, q_token_chunk_id, head_id)
 template<typename scalar_t, typename inner_scalar_t>
 struct FlashAttnTrait {
-    inline static constexpr inner_scalar_t inner_neg_inf =
-        -std::numeric_limits<inner_scalar_t>::infinity();
-
-
     struct ParamSet {
         const scalar_t* q;    // total_q x num_heads x head_dim
         const scalar_t* k;    // num_blocks x block_size x num_kv_heads x head_dim
@@ -197,7 +192,7 @@ struct FlashAttnTrait {
             if (valid_thread) {
                 layout.out_at(threadIdx.y, threadIdx.x) = scalar_t(0);
                 if (threadIdx.x == 0) {
-                    layout.last_chunk_max_at(threadIdx.y) = inner_neg_inf;
+                    layout.last_chunk_max_at(threadIdx.y) = inner_scalar_t(-INFINITY);
                     layout.last_chunk_sum_at(threadIdx.y) = inner_scalar_t(0);
                 }
             }
@@ -400,6 +395,7 @@ struct FlashAttnTrait {
         toy_flash_attn_assert(blockDim.x >= warpSize);
         toy_flash_attn_assert(blockDim.x % warpSize == 0);
         toy_flash_attn_assert(param.kv_chunk_size <= blockDim.x);
+        const inner_scalar_t scalar = inner_scalar_t(sqrt((double)param.head_dim));
 
         if (threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim) {
             layout.q_at(threadIdx.y , threadIdx.x) = 
@@ -488,7 +484,7 @@ struct FlashAttnTrait {
                         }
 #endif
                         layout.score_reduction_at(threadIdx.y, kv_chunk_off) = valid_q_kv_pair ? 
-                            check_non_finite_val(static_cast<inner_scalar_t>(val) / sqrt((double)param.head_dim), "score") : inner_neg_inf;
+                            check_non_finite_val(static_cast<inner_scalar_t>(val) / scalar, "score") : inner_scalar_t(-INFINITY);
                     }
                 } while(0);
             }
@@ -498,13 +494,13 @@ struct FlashAttnTrait {
                     layout.max_reduction_at(threadIdx.y, threadIdx.x) = 
                         layout.score_reduction_at(threadIdx.y, threadIdx.x);
                     layout.sum_reduction_at(threadIdx.y, threadIdx.x) = 
-                        layout.score_reduction_at(threadIdx.y, threadIdx.x) != inner_neg_inf ?
+                        layout.score_reduction_at(threadIdx.y, threadIdx.x) != inner_scalar_t(-INFINITY) ?
                                 inner_scalar_t(1.0) : inner_scalar_t(0.0);
                 }
                 __syncthreads();
 
                 inner_scalar_t max_ = valid_thread ?
-                    layout.max_reduction_at(threadIdx.y, threadIdx.x) : inner_neg_inf;
+                    layout.max_reduction_at(threadIdx.y, threadIdx.x) : inner_scalar_t(-INFINITY);
                 inner_scalar_t sum_ = valid_thread ?
                     layout.sum_reduction_at(threadIdx.y, threadIdx.x) : inner_scalar_t(0);
                 int32_t bound = ceil_pow2_u32(param.kv_chunk_size) / 2;
@@ -512,7 +508,7 @@ struct FlashAttnTrait {
                     if (threadIdx.x < bound && threadIdx.y < param.q_chunk_size) {
                         bool valid_neighbor = threadIdx.x + bound < param.kv_chunk_size && threadIdx.y < param.q_chunk_size;
                         inner_scalar_t max_neighbor = valid_neighbor ?
-                            layout.max_reduction_at(threadIdx.y, threadIdx.x + bound) : inner_neg_inf;
+                            layout.max_reduction_at(threadIdx.y, threadIdx.x + bound) : inner_scalar_t(-INFINITY);
                         inner_scalar_t sum_neighbor = valid_neighbor ? 
                             layout.sum_reduction_at(threadIdx.y, threadIdx.x + bound) : inner_scalar_t(0.0);
                         inner_scalar_t max_merge = max(max_, max_neighbor);
@@ -821,6 +817,7 @@ struct FlashAttnTrait {
 }; 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    // m.def("flash_attn_varlen_with_block_v3", &FlashAttnTrait<at::BFloat16, float>::flash_attn_varlen_with_block, "flash attn varlen with block");
-    m.def("flash_attn_varlen_with_block_v3", &FlashAttnTrait<float, float>::flash_attn_varlen_with_block, "flash attn varlen with block");
+    m.def("flash_attn_varlen_with_block_v3", &FlashAttnTrait<at::BFloat16, float>::flash_attn_varlen_with_block, "flash attn varlen with block");
+    // m.def("flash_attn_varlen_with_block_v3", &FlashAttnTrait<float, float>::flash_attn_varlen_with_block, "flash attn varlen with block");
+    // m.def("flash_attn_varlen_with_block_v3", &FlashAttnTrait<at::BFloat16, at::BFloat16>::flash_attn_varlen_with_block, "flash attn varlen with block");
 }

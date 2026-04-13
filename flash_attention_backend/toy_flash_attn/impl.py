@@ -65,8 +65,6 @@ class ToyFlashAttentionImpl(AttentionImpl["ToyFlashAttentionMetadata"]):
         output_scale: torch.Tensor | None = None,
         output_block_scale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        del layer
-
         if output_scale is not None or output_block_scale is not None:
             raise NotImplementedError("fused output quantization is not supported")
 
@@ -115,6 +113,7 @@ class ToyFlashAttentionImpl(AttentionImpl["ToyFlashAttentionMetadata"]):
             causal=causal,
             window_size=self.sliding_window,
             block_table=block_table,
+            layer=layer,
             out=output[:num_actual_tokens],
         )
         return output

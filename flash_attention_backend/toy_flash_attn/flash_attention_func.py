@@ -34,6 +34,43 @@ def _maybe_log_cuda_inputs(**tensors: torch.Tensor | None) -> None:
     )
 
 
+def _maybe_log_with_block_dtypes(
+    *,
+    batch_id: int,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    Q: torch.Tensor,
+    K: torch.Tensor,
+    V: torch.Tensor,
+    S: torch.Tensor,
+    P: torch.Tensor,
+    o: torch.Tensor,
+) -> None:
+    if os.environ.get("TOY_FLASH_ATTN_PRINT_DTYPE", "0") != "1":
+        return
+    if batch_id != 0:
+        return
+    fp32_precision = (
+        torch.backends.cuda.matmul.fp32_precision
+        if hasattr(torch.backends.cuda.matmul, "fp32_precision")
+        else "no fp32_precision"
+    )
+    allow_tf32 = (
+        torch.backends.cuda.matmul.allow_tf32
+        if hasattr(torch.backends.cuda.matmul, "allow_tf32")
+        else "no allow_tf32"
+    )
+    print(
+        "[toy_flash_attn] with_block dtype trace:",
+        f"q={q.dtype} k={k.dtype} v={v.dtype} "
+        f"Q={Q.dtype} K={K.dtype} V={V.dtype} "
+        f"S={S.dtype} P={P.dtype} o={o.dtype} "
+        f"fp32_precision={fp32_precision} allow_tf32={allow_tf32}",
+        flush=True,
+    )
+
+
 def _clone_for_dump(value):
     if isinstance(value, torch.Tensor):
         return value.detach().cpu().clone()
@@ -57,6 +94,15 @@ def _maybe_dump_flash_attn_context(op_name: str, **payload) -> None:
     file_path = dump_path / f"{dump_id:05d}_{op_name}.pt"
     torch.save(_clone_for_dump(payload), file_path)
     print(f"[toy_flash_attn] dumped {op_name} context to {file_path}", flush=True)
+
+
+def _layer_debug_meta(layer) -> dict:
+    if layer is None:
+        return {}
+    return {
+        "layer_name": type(layer).__name__,
+        "layer_idx": getattr(layer, "layer_idx", None),
+    }
 
 
 def _check_cuda_tensor(
@@ -102,6 +148,7 @@ def flash_attn_varlen_func(
     causal=False,
     window_size: tuple[int, int]  | None = None,
     block_table=None,
+    layer=None,
     # return_softmax_lse=False,
     out: torch.Tensor|None = None,
 ) -> torch.Tensor: 
@@ -110,8 +157,8 @@ def flash_attn_varlen_func(
         q和kv尾对齐
     '''
     if block_table is not None:
-        return flash_attn_varlen_with_block_cu(q, k, v, max_seqlen_q, cu_seqlens_q, max_seqlen_k, seqused_k, causal, window_size, block_table, out)
-        # return flash_attn_varlen_with_block(q, k, v, max_seqlen_q, cu_seqlens_q, max_seqlen_k, seqused_k, causal, window_size, block_table, out)
+        # return flash_attn_varlen_with_block_cu(q, k, v, max_seqlen_q, cu_seqlens_q, max_seqlen_k, seqused_k, causal, window_size, block_table, out, layer=layer)
+        return flash_attn_varlen_with_block(q, k, v, max_seqlen_q, cu_seqlens_q, max_seqlen_k, seqused_k, causal, window_size, block_table, out, layer=layer)
     else:
         return flash_attn_varlen_without_block(q, k, v, max_seqlen_q,cu_seqlens_q, max_seqlen_k, cu_seqlens_k, causal, window_size, out)
 
@@ -129,7 +176,12 @@ def flash_attn_varlen_with_block(
     block_table=None,
     # return_softmax_lse=False,
     out: torch.Tensor|None = None,
+    layer=None,
 ) -> torch.Tensor: 
+    q = q.to(dtype=torch.float32)
+    k = k.to(dtype=torch.float32)
+    v = v.to(dtype=torch.float32)
+    out = out.to(dtype=torch.float32)
     assert block_table is not None
     if out is None:
         out = torch.empty_like(q, device=q.device)
@@ -159,6 +211,18 @@ def flash_attn_varlen_with_block(
         S = S.masked_fill(mask, float("-inf"))
         P = S.softmax(2)
         o = P.matmul(V.transpose(0, 1)).transpose(0, 1)
+        _maybe_log_with_block_dtypes(
+            batch_id=batch_id,
+            q=q,
+            k=k,
+            v=v,
+            Q=Q,
+            K=K,
+            V=V,
+            S=S,
+            P=P,
+            o=o,
+        )
         out[q_range[0]:q_range[1]] = o
     _maybe_dump_flash_attn_context(
         "with_block",
@@ -172,6 +236,7 @@ def flash_attn_varlen_with_block(
         causal=causal,
         window_size=window_size,
         block_table=block_table,
+        debug_meta=_layer_debug_meta(layer),
         result=out,
     )
     return out
@@ -240,6 +305,7 @@ def flash_attn_varlen_with_block_cu(
     block_table=None,
     # return_softmax_lse=False,
     out: torch.Tensor|None = None,
+    layer=None,
 ) -> torch.Tensor:
     if out is None:
         out = torch.empty_like(q)
@@ -282,10 +348,10 @@ def flash_attn_varlen_with_block_cu(
         expected_dtype=_CUDA_INDEX_DTYPE,
     )
     _check_cuda_tensor("out", out, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
-    q = q.to(dtype=torch.float32)
-    k = k.to(dtype=torch.float32)
-    v = v.to(dtype=torch.float32)
-    out = out.to(dtype=torch.float32)
+    # q = q.to(dtype=torch.float32)
+    # k = k.to(dtype=torch.float32)
+    # v = v.to(dtype=torch.float32)
+    # out = out.to(dtype=torch.float32)
 
     out = _ops.flash_attn_varlen_with_block_v3(q, k, v, 
                                     max_seqlen_q, cu_seqlens_q,
@@ -305,6 +371,7 @@ def flash_attn_varlen_with_block_cu(
         causal=causal,
         window_size=window_size,
         block_table=block_table,
+        debug_meta=_layer_debug_meta(layer),
         result=out,
     )
     return out.to(dtype=_CUDA_VALUE_DTYPE)
