@@ -396,7 +396,8 @@ struct FlashAttnTrait {
         toy_flash_attn_assert(blockDim.x >= warpSize);
         toy_flash_attn_assert(blockDim.x % warpSize == 0);
         toy_flash_attn_assert(param.kv_chunk_size <= blockDim.x);
-        const inner_scalar_t scalar = inner_scalar_t(sqrt((double)param.head_dim));
+        // const inner_scalar_t scalar = inner_scalar_t(sqrt((double)param.head_dim));
+        const inner_scalar_t softmax_scale_log2 = M_LOG2Ef32 / sqrt((double)param.head_dim);
 
         if (threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim) {
             layout.q_at(threadIdx.y , threadIdx.x) = 
@@ -486,7 +487,7 @@ struct FlashAttnTrait {
                         }
 #endif
                         layout.score_reduction_at(threadIdx.y, kv_chunk_off) = valid_q_kv_pair ? 
-                            check_non_finite_val(val/ scalar, "score") : inner_scalar_t(-INFINITY);
+                            check_non_finite_val(val, "score") : inner_scalar_t(-INFINITY);
                     }
                 } while(0);
             }
@@ -514,8 +515,8 @@ struct FlashAttnTrait {
                         inner_scalar_t sum_neighbor = valid_neighbor ? 
                             layout.sum_reduction_at(threadIdx.y, threadIdx.x + bound) : inner_scalar_t(0.0);
                         inner_scalar_t max_merge = max(max_, max_neighbor);
-                        inner_scalar_t sum_merge = check_non_finite_val(sum_ * __expf(check_nan_val(softmax_sub(max_ ,max_merge), "softmax_sum_reduction_block_old")) + 
-                                                sum_neighbor * __expf(check_nan_val(softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_block_new")), 
+                        inner_scalar_t sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_block_old")) + 
+                                                sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_block_new")), 
                                                 "softmax_sum_reduction_block");
                         max_ = max_merge;
                         sum_ = sum_merge;
@@ -532,8 +533,8 @@ struct FlashAttnTrait {
                     max_neighbor = __shfl_down_sync(0xffffffff, max_, 16);
                     sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 16);
                     max_merge = max(max_, max_neighbor);
-                    sum_merge = check_non_finite_val(sum_ * __expf(check_nan_val(softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
-                                                sum_neighbor * __expf(check_nan_val(softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
+                                                sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
                                                 "softmax_sum_reduction_warp");
                     max_ = max_merge;
                     sum_ = sum_merge;
@@ -541,8 +542,8 @@ struct FlashAttnTrait {
                     max_neighbor = __shfl_down_sync(0xffffffff, max_, 8);
                     sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 8);
                     max_merge = max(max_, max_neighbor);
-                    sum_merge = check_non_finite_val(sum_ * __expf(check_nan_val(softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
-                                                sum_neighbor * __expf(check_nan_val(softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
+                                                sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
                                                 "softmax_sum_reduction_warp");
                     max_ = max_merge;
                     sum_ = sum_merge;
@@ -550,8 +551,8 @@ struct FlashAttnTrait {
                     max_neighbor = __shfl_down_sync(0xffffffff, max_, 4);
                     sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 4);
                     max_merge = max(max_, max_neighbor);
-                    sum_merge = check_non_finite_val(sum_ * __expf(check_nan_val(softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
-                                                sum_neighbor * __expf(check_nan_val(softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
+                                                sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
                                                 "softmax_sum_reduction_warp");
                     max_ = max_merge;
                     sum_ = sum_merge;
@@ -559,8 +560,8 @@ struct FlashAttnTrait {
                     max_neighbor = __shfl_down_sync(0xffffffff, max_, 2);
                     sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 2);
                     max_merge = max(max_, max_neighbor);
-                    sum_merge = check_non_finite_val(sum_ * __expf(check_nan_val(softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
-                                                sum_neighbor * __expf(check_nan_val(softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
+                                                sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
                                                 "softmax_sum_reduction_warp");
                     max_ = max_merge;
                     sum_ = sum_merge;
@@ -568,8 +569,8 @@ struct FlashAttnTrait {
                     max_neighbor = __shfl_down_sync(0xffffffff, max_, 1);
                     sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 1);
                     max_merge = max(max_, max_neighbor);
-                    sum_merge = check_non_finite_val(sum_ * __expf(check_nan_val(softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
-                                                sum_neighbor * __expf(check_nan_val(softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
+                                                sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
                                                 "softmax_sum_reduction_warp");
                     max_ = max_merge;
                     sum_ = sum_merge;
@@ -597,7 +598,7 @@ struct FlashAttnTrait {
                 if (valid_thread) { // block 广播max & sum, 回填softmax
                     inner_scalar_t max_ = layout.max_reduction_at(threadIdx.y, 0);
                     inner_scalar_t score = layout.score_reduction_at(threadIdx.y, threadIdx.x);
-                    inner_scalar_t softmax = __expf(check_nan_val(softmax_sub(score, max_), "softmax_exp_sub"));    // 去除sum除法
+                    inner_scalar_t softmax = exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(score, max_), "softmax_exp_sub"));    // 去除sum除法
                     layout.softmax_reduction_at(threadIdx.y, threadIdx.x) = softmax;
                 }
                 __syncthreads();
@@ -687,12 +688,12 @@ struct FlashAttnTrait {
                     inner_scalar_t new_sum = layout.sum_reduction_at(threadIdx.y, 0);
                     merge_m = max(old_m, new_m);
                     merge_sum = check_non_finite_val(
-                            old_sum * __expf(check_nan_val(softmax_sub(old_m, merge_m), "softmax_chunk_reduction_sum_old_sub")) + 
-                            new_sum * __expf(check_nan_val(softmax_sub(new_m, merge_m), "softmax_chunk_reduction_sum_new_sub"))
+                            old_sum * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(old_m, merge_m), "softmax_chunk_reduction_sum_old_sub")) + 
+                            new_sum * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(new_m, merge_m), "softmax_chunk_reduction_sum_new_sub"))
                         , "softmax_chunk_reduction_sum");
                     inner_scalar_t merge_e = check_non_finite_val(
-                            old_e * old_sum * __expf(check_nan_val(softmax_sub(old_m, merge_m), "out_chunk_reduction_old_sub")) +
-                            new_e * new_sum * __expf(check_nan_val(softmax_sub(new_m, merge_m), "out_chunk_reduction_new_sub"))  
+                            old_e * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(old_m, merge_m), "out_chunk_reduction_old_sub")) +
+                            new_e * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(new_m, merge_m), "out_chunk_reduction_new_sub"))  
                         , "out_chunk_reduction");       // 去除sum除法，统一到最后
                     layout.out_at(threadIdx.y, threadIdx.x) = merge_e;
 #ifdef DEBUG_FLASH_ATTN_V3_TRACE
@@ -731,7 +732,7 @@ struct FlashAttnTrait {
             if (param.q_token_id() < param.q_seqlen() && valid_thread) {
                 inner_scalar_t val = layout.out_at(threadIdx.y, threadIdx.x);
                 inner_scalar_t merge_sum = layout.last_chunk_sum_at(threadIdx.y);
-                param.out_at(param.q_token_id(), threadIdx.x) = scalar_t(val / merge_sum);
+                param.out_at(param.q_token_id(), threadIdx.x) = scalar_t(softmax_div(val, merge_sum));
             }
         }
     };
