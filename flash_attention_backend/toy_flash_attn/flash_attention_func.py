@@ -157,8 +157,21 @@ def flash_attn_varlen_func(
         q和kv尾对齐
     '''
     if block_table is not None:
-        # return flash_attn_varlen_with_block_cu(q, k, v, max_seqlen_q, cu_seqlens_q, max_seqlen_k, seqused_k, causal, window_size, block_table, out, layer=layer)
-        return flash_attn_varlen_with_block(q, k, v, max_seqlen_q, cu_seqlens_q, max_seqlen_k, seqused_k, causal, window_size, block_table, out, layer=layer)
+        if os.getenv("TOY_FLASH_ATTN_USE_WITH_BLOCK", "0") == "1":
+            return flash_attn_varlen_with_block(
+                q, k, v,
+                max_seqlen_q, cu_seqlens_q,
+                max_seqlen_k, seqused_k,
+                causal, window_size, block_table, out,
+                layer=layer,
+            )
+        return flash_attn_varlen_with_block_cu(
+            q, k, v,
+            max_seqlen_q, cu_seqlens_q,
+            max_seqlen_k, seqused_k,
+            causal, window_size, block_table, out,
+            layer=layer,
+        )
     else:
         return flash_attn_varlen_without_block(q, k, v, max_seqlen_q,cu_seqlens_q, max_seqlen_k, cu_seqlens_k, causal, window_size, out)
 
@@ -178,10 +191,10 @@ def flash_attn_varlen_with_block(
     out: torch.Tensor|None = None,
     layer=None,
 ) -> torch.Tensor: 
-    q = q.to(dtype=torch.float32)
-    k = k.to(dtype=torch.float32)
-    v = v.to(dtype=torch.float32)
-    out = out.to(dtype=torch.float32)
+    # q = q.to(dtype=torch.float32)
+    # k = k.to(dtype=torch.float32)
+    # v = v.to(dtype=torch.float32)
+    # out = out.to(dtype=torch.float32)
     assert block_table is not None
     if out is None:
         out = torch.empty_like(q, device=q.device)

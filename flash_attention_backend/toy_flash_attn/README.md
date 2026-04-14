@@ -37,10 +37,12 @@
 
 入口在 [flash_attention_func.py](/home/linf/code/cuda/flash_attention_backend/toy_flash_attn/flash_attention_func.py) 的 `flash_attn_varlen_func(...)`。
 
-`block_table is not None` 时会走 paged 路径。当前分发是通过注释切换的：
+`block_table is not None` 时会走 paged 路径。当前分发由环境变量控制：
 
-- 走 CUDA：`flash_attn_varlen_with_block_cu(...)`
-- 走 Python baseline：`flash_attn_varlen_with_block(...)`
+- `TOY_FLASH_ATTN_USE_WITH_BLOCK=1`
+  走 Python baseline：`flash_attn_varlen_with_block(...)`
+- 不设置，或设成其他值
+  走 CUDA：`flash_attn_varlen_with_block_cu(...)`
 
 调试时常见做法：
 
@@ -94,6 +96,7 @@ dump 文件名形如：
 先让 `flash_attn_varlen_func(...)` 分发到 `flash_attn_varlen_with_block(...)`，再运行真实链路，例如：
 
 ```bash
+TOY_FLASH_ATTN_USE_WITH_BLOCK=1 \
 TOY_FLASH_ATTN_DUMP_DIR=$(pwd)/flash_attention_backend/base_gpt2.pt \
 python -m unittest flash_attention_backend.test_self_flash_attn_backend
 ```
@@ -110,6 +113,44 @@ python -m unittest flash_attention_backend.test_self_flash_attn_backend
 ```
 
 目录名只是习惯，不要求固定。
+
+### 3. 一键生成 baseline/custom dump 并跑分析
+
+也可以直接用：
+
+- [run_gpt2_dump_analysis.py](/home/linf/code/cuda/flash_attention_backend/toy_flash_attn/run_gpt2_dump_analysis.py)
+
+它会顺序执行：
+
+1. `with_block` 生成 baseline dump
+2. `with_block_cu` 生成 custom dump
+3. 运行 `analyze_flash_attn_dumps.py` 生成报告
+
+默认命令：
+
+```bash
+python flash_attention_backend/toy_flash_attn/run_gpt2_dump_analysis.py
+```
+
+默认输出：
+
+- `flash_attention_backend/base_gpt2.pt/`
+- `flash_attention_backend/bf16_fp32.pt/`
+- `flash_attention_backend/base_gpt2.log`
+- `flash_attention_backend/bf16_fp32.log`
+- `flash_attention_backend/analyze.log`
+
+可选参数示例：
+
+```bash
+python flash_attention_backend/toy_flash_attn/run_gpt2_dump_analysis.py \
+  --output-root flash_attention_backend \
+  --base-name base_gpt2.pt \
+  --custom-name bf16_fp32.pt \
+  --input-threshold 1e-5 \
+  --output-threshold 1e-3 \
+  --top-k 10
+```
 
 ## replay 单测
 
@@ -267,6 +308,8 @@ python flash_attention_backend/toy_flash_attn/analyze_flash_attn_dumps.py \
 
 - `TOY_FLASH_ATTN_DUMP_DIR`
   开启 dump。
+- `TOY_FLASH_ATTN_USE_WITH_BLOCK`
+  设为 `1` 时走 Python baseline；否则走 CUDA 实现。
 - `TOY_FLASH_ATTN_REPLAY_DUMP`
   replay 单测读取的 dump 路径。
 - `TOY_FLASH_ATTN_DEBUG=1`
