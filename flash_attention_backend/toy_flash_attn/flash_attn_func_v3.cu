@@ -3,6 +3,7 @@
 // #include <__clang_cuda_cmath.h>
 // #include <__clang_cuda_math.h>
 // #include <__clang_cuda_math_forward_declares.h>
+// #include <__clang_cuda_builtin_vars.h>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -595,11 +596,8 @@ struct FlashAttnTrait {
 
                 if (valid_thread) { // block 广播max & sum, 回填softmax
                     inner_scalar_t max_ = layout.max_reduction_at(threadIdx.y, 0);
-                    inner_scalar_t sum_ = layout.sum_reduction_at(threadIdx.y, 0);
                     inner_scalar_t score = layout.score_reduction_at(threadIdx.y, threadIdx.x);
-                    inner_scalar_t softmax = check_non_finite_val(
-                        softmax_div(__expf(check_nan_val(softmax_sub(score, max_), "softmax_exp_sub")) , sum_), 
-                        "softmax_exp_div");
+                    inner_scalar_t softmax = __expf(check_nan_val(softmax_sub(score, max_), "softmax_exp_sub"));    // 去除sum除法
                     layout.softmax_reduction_at(threadIdx.y, threadIdx.x) = softmax;
                 }
                 __syncthreads();
@@ -619,7 +617,7 @@ struct FlashAttnTrait {
                 bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.kv_chunk_size;
                 if (valid_thread) {
                     // 乘法低的精度，加法高精度
-                    inner_scalar_t s = layout.softmax_reduction_at(threadIdx.y, threadIdx.x);
+                    scalar_t s = static_cast<scalar_t>(layout.softmax_reduction_at(threadIdx.y, threadIdx.x));
                     inner_scalar_t v = layout.v_t_at(head_off, threadIdx.x);
                     inner_scalar_t val = check_non_finite_val(s * v, "softmax_mul_v");
                     layout.sv_matmul_reduction_at(threadIdx.y, threadIdx.x) = inner_scalar_t(val);
@@ -693,9 +691,9 @@ struct FlashAttnTrait {
                             new_sum * __expf(check_nan_val(softmax_sub(new_m, merge_m), "softmax_chunk_reduction_sum_new_sub"))
                         , "softmax_chunk_reduction_sum");
                     inner_scalar_t merge_e = check_non_finite_val(
-                            old_e * softmax_div(old_sum, merge_sum) * __expf(check_nan_val(softmax_sub(old_m, merge_m), "out_chunk_reduction_old_sub")) +
-                            new_e * softmax_div(new_sum, merge_sum) * __expf(check_nan_val(softmax_sub(new_m, merge_m), "out_chunk_reduction_new_sub"))  
-                        , "out_chunk_reduction");
+                            old_e * old_sum * __expf(check_nan_val(softmax_sub(old_m, merge_m), "out_chunk_reduction_old_sub")) +
+                            new_e * new_sum * __expf(check_nan_val(softmax_sub(new_m, merge_m), "out_chunk_reduction_new_sub"))  
+                        , "out_chunk_reduction");       // 去除sum除法，统一到最后
                     layout.out_at(threadIdx.y, threadIdx.x) = merge_e;
 #ifdef DEBUG_FLASH_ATTN_V3_TRACE
                     if (debug_row && threadIdx.x == 0) {
@@ -731,7 +729,9 @@ struct FlashAttnTrait {
         {   // write back out
             bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim;
             if (param.q_token_id() < param.q_seqlen() && valid_thread) {
-                param.out_at(param.q_token_id(), threadIdx.x) = scalar_t(layout.out_at(threadIdx.y, threadIdx.x));
+                inner_scalar_t val = layout.out_at(threadIdx.y, threadIdx.x);
+                inner_scalar_t merge_sum = layout.last_chunk_sum_at(threadIdx.y);
+                param.out_at(param.q_token_id(), threadIdx.x) = scalar_t(val / merge_sum);
             }
         }
     };
