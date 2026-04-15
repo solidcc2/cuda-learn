@@ -127,7 +127,10 @@ def _check_cuda_tensor(
 _ops = load(
     name="toy_torch_flash_attention_func",
     sources=[
-        str(_THIS_DIR / "flash_attn_func_v3.cu"),
+        str(_THIS_DIR / "v4/flash_attn_func.cu"),
+    ],
+    extra_include_paths=[
+        str(_THIS_DIR / "v4"),
     ],
     extra_cflags=["-O2"],
     extra_cuda_cflags=["-O2"],
