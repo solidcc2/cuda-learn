@@ -568,7 +568,7 @@ def _assert_close_with_block_cu(
 
 
     assert out_cu.shape == out_ref.shape
-    assert torch.allclose(out_cu, out_ref, atol=3e-2, rtol=3e-2), (
+    assert torch.allclose(out_cu, out_ref, atol=1e-2, rtol=1e-2), (
         f"Mismatch with q_lens={q_lens}, k_lens={k_lens}, causal={causal}, "
         f"window_size={window_size}, use_block_cu=True"
     )
@@ -602,7 +602,7 @@ def _assert_dump_replay_close(dump_path: Path) -> None:
     print("max diff:", diff.max().item())
     print("mean diff:", diff.mean().item())
     assert out_cu.shape == out_ref.shape
-    assert torch.allclose(out_cu, out_ref, atol=3e-2, rtol=3e-2), (
+    assert torch.allclose(out_cu, out_ref, atol=1e-2, rtol=1e-2), (
         f"Mismatch when replaying dumped context from {dump_path}"
     )
 
@@ -733,6 +733,19 @@ class FlashAttentionFuncCuKernelHeadDim64RegressionTest(unittest.TestCase):
     def setUp(self) -> None:
         _require_cuda()
 
+    def test_with_block_cu_head_dim_64_minimal_no_mask_no_padding_regression(self) -> None:
+        for iteration in range(1000):
+            with self.subTest(iteration=iteration):
+                _assert_close_with_block_cu(
+                    q_lens=[4, 4],
+                    k_lens=None,
+                    causal=False,
+                    window_size=None,
+                    head_dim=64,
+                    dtype=torch.bfloat16,
+                    seed=iteration,
+                )
+
     def test_with_block_cu_head_dim_64_tail_aligned_causal_local_window_regression(self) -> None:
         for iteration in range(1000):
             with self.subTest(iteration=iteration):
@@ -743,7 +756,7 @@ class FlashAttentionFuncCuKernelHeadDim64RegressionTest(unittest.TestCase):
                     window_size=(3, 0),
                     head_dim=64,
                     dtype=torch.bfloat16,
-                    seed=1,
+                    seed=iteration,
                 )
 
     def test_with_block_cu_head_dim_64_regression_matrix(self) -> None:

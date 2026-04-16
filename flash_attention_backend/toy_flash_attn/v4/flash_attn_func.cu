@@ -22,6 +22,7 @@ __global__ void kernel_wrapper(
 // grid(batch_id, q_token_chunk_id, head_id)
 template<typename scalar_t, typename inner_scalar_t>
 struct FlashAttnTrait {
+    static const int32_t K_X_STRIDE=16;  // x 维度每线程处理16个数
     struct ParamSet;
     struct TileLayout;
     static __device__ void kernel(ParamSet& param);
@@ -100,7 +101,7 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t>::ParamSet {
     }
     // q_token_id bound with threadIdx.y
     __device__ inline int64_t q_token_id() const {
-        const int64_t idx = blockIdx.y * blockDim.y + threadIdx.y;
+        const int64_t idx = blockIdx.y * q_chunk_size + threadIdx.y;
         return idx;
     }
     
@@ -160,11 +161,19 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t>::ParamSet {
 template<typename scalar_t, typename inner_scalar_t>
 struct FlashAttnTrait<scalar_t, inner_scalar_t>::TileLayout {
     static __device__ inline TileLayout builder(char* smem, const ParamSet& param) {
+        const int64_t  head_dim_thread_count = (param.head_dim + K_X_STRIDE - 1) / K_X_STRIDE;
         auto layout = layout_init(smem, param);
         toy_flash_attn_assert(smem != nullptr);
-        bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim;
+        bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < head_dim_thread_count;
         if (valid_thread) {
-            layout.out_at(threadIdx.y, threadIdx.x) = inner_scalar_t(0);
+            int64_t base = threadIdx.x * K_X_STRIDE;
+            #pragma unroll
+            for(int64_t lane=0; lane < K_X_STRIDE; lane++) {
+                int64_t head_pos = base + lane;
+                if (head_pos < param.head_dim) {
+                    layout.out_at(threadIdx.y, head_pos) = inner_scalar_t(0);
+                }
+            }
             if (threadIdx.x == 0) {
                 layout.last_chunk_max_at(threadIdx.y) = inner_scalar_t(-INFINITY);
                 layout.last_chunk_sum_at(threadIdx.y) = inner_scalar_t(0);
@@ -328,7 +337,7 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t>::TileLayout {
         toy_flash_attn_assert(head_pos < param.head_dim);
         return k_at(k_seq_id % param.kv_chunk_size, head_pos);
     }
-    
+
 private:
     __device__ __host__ TileLayout(const ParamSet& p):param(p) {}
 
@@ -363,38 +372,58 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
         param.head_id() == 0 &&
         param.q_token_id() < 2;
 #endif
-    // load q chunk
+    const int64_t head_dim_thread_count = (param.head_dim + K_X_STRIDE - 1) / K_X_STRIDE;
+    const int64_t kv_chunk_size_thread_count = (param.kv_chunk_size + K_X_STRIDE - 1) / K_X_STRIDE;
     toy_flash_attn_assert(param.q_chunk_size <= blockDim.y);
     toy_flash_attn_assert(param.kv_chunk_size <= blockDim.y);
-    toy_flash_attn_assert(param.head_dim <= blockDim.x);
-    toy_flash_attn_assert(blockDim.x >= warpSize);
-    toy_flash_attn_assert(blockDim.x % warpSize == 0);
-    toy_flash_attn_assert(param.kv_chunk_size <= blockDim.x);
-    // const inner_scalar_t scalar = inner_scalar_t(sqrt((double)param.head_dim));
+    toy_flash_attn_assert(head_dim_thread_count <= blockDim.x);
+    toy_flash_attn_assert(kv_chunk_size_thread_count <= blockDim.x);
+    toy_flash_attn_assert((blockDim.x & (blockDim.x - 1)) == 0);  // 2 的幂
+    toy_flash_attn_assert(param.q_chunk_size * blockDim.x % warpSize == 0);
+
+
     const inner_scalar_t softmax_scale_log2 = M_LOG2Ef32 / sqrt((double)param.head_dim);
 
-    if (threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim) {
-        layout.q_at(threadIdx.y , threadIdx.x) = 
-            (param.q_token_id() < param.q_seqlen()) ? param.q_at(param.q_token_id(), threadIdx.x) : scalar_t(0);
-
-    }
-    __syncthreads();
     const int64_t kv_win[2] = {
         param.window_size[0] == -1 ? param.kv_seqlen() : param.window_size[0],
         param.causal ? 0 : 
             param.window_size[1] == -1 ? param.kv_seqlen() : param.window_size[1]
     };
+
     const int64_t q_kv_offset = param.q_seqlen() - param.kv_seqlen();
+    {   // load q chunk 
+        bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < head_dim_thread_count;
+        if (valid_thread) {
+            int64_t base = threadIdx.x * K_X_STRIDE;
+            #pragma unroll
+            for (int64_t lane = 0; lane < K_X_STRIDE; ++lane) {
+                int64_t head_pos = base + lane;
+                if (head_pos < param.head_dim) {
+                    layout.q_at(threadIdx.y , head_pos) = 
+                        (param.q_token_id() < param.q_seqlen()) ? param.q_at(param.q_token_id(), head_pos) : scalar_t(0);
+                }
+            }
+
+        }
+        __syncthreads();
+    }
 
     // TODO: kv_chunk的有效边界是远大于win size的，这里可以剪枝
     for(int64_t kv_chunk_id = 0; 
             kv_chunk_id < (param.kv_seqlen() + param.kv_chunk_size - 1) / param.kv_chunk_size; kv_chunk_id++) {
         {   // kv_seq_id 作用域 for k tile load
             int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + threadIdx.y;
-            bool valid_thread = threadIdx.y < param.kv_chunk_size && threadIdx.x < param.head_dim;
+            bool valid_thread = threadIdx.y < param.kv_chunk_size && threadIdx.x < head_dim_thread_count;
             if (valid_thread) {
-                layout.k_at(threadIdx.y , threadIdx.x) = 
-                    (kv_seq_id < param.kv_seqlen()) ? param.k_at(kv_seq_id, threadIdx.x) : scalar_t(0);
+                int64_t base = threadIdx.x * K_X_STRIDE;
+                #pragma unroll 
+                for(int64_t lane = 0; lane < K_X_STRIDE; ++lane) {
+                    int64_t head_pos = base + lane;
+                    if (head_pos < param.head_dim) {
+                        layout.k_at(threadIdx.y , head_pos) = 
+                            (kv_seq_id < param.kv_seqlen()) ? param.k_at(kv_seq_id, head_pos) : scalar_t(0);
+                    }
+                }
             }
             __syncthreads();
         }
@@ -402,41 +431,79 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
         // Q K matmul
         for(int kv_chunk_off = 0; kv_chunk_off <param.kv_chunk_size; kv_chunk_off ++) {
             int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + kv_chunk_off;
-            if (threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim) {
-                if (param.q_token_id() < param.q_seqlen()) {
-                    inner_scalar_t q_elem = layout.q_in_tile(param.q_token_id(), threadIdx.x);
-                    inner_scalar_t k_elem = layout.k_in_tile(kv_seq_id, kv_chunk_id, threadIdx.x);
-                    inner_scalar_t qk_elem = q_elem * k_elem;
-                    layout.qk_matmul_reduction_at(threadIdx.y, threadIdx.x) = 
-                        check_non_finite_val(inner_scalar_t(qk_elem), "qk_dot");    // 乘在bf16, 加在fp32
-                } else {
-                    layout.qk_matmul_reduction_at(threadIdx.y, threadIdx.x) = inner_scalar_t(0);
+            {   // QK 对位乘
+                bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < head_dim_thread_count;
+                if (valid_thread) {
+                    int64_t base = threadIdx.x * K_X_STRIDE;
+                    #pragma unroll
+                    for (int64_t lane = 0; lane < K_X_STRIDE; lane++) {
+                        int64_t head_pos = base + lane;
+                        if (head_pos >= param.head_dim) continue;
+                        if (param.q_token_id() < param.q_seqlen()) {
+                            inner_scalar_t q_elem = layout.q_in_tile(param.q_token_id(), head_pos);
+                            inner_scalar_t k_elem = layout.k_in_tile(kv_seq_id, kv_chunk_id, head_pos);
+                            inner_scalar_t qk_elem = q_elem * k_elem;
+                            layout.qk_matmul_reduction_at(threadIdx.y, head_pos) = 
+                                check_non_finite_val(inner_scalar_t(qk_elem), "qk_dot");    // 乘在bf16, 加在fp32
+                        } else {
+                            layout.qk_matmul_reduction_at(threadIdx.y, head_pos) = inner_scalar_t(0);
+                        }
+                    }
                 }
             }
             __syncthreads();
             
             do {     // while(0) 范围控制 line sum reduction
-                bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim;
+                bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < head_dim_thread_count;
+                int64_t base = threadIdx.x * K_X_STRIDE;
+                inner_scalar_t stride_sum = inner_scalar_t(0);
+                #pragma unroll
+                for(int64_t lane=0; lane < K_X_STRIDE; lane++) {
+                    int64_t head_pos = base + lane;
+                    if (head_pos >= param.head_dim) continue;
+                    stride_sum += valid_thread ? layout.qk_matmul_reduction_at(threadIdx.y, head_pos) : inner_scalar_t(0);
+                }
+                inner_scalar_t val = stride_sum;
+                if (valid_thread) {
+                    layout.qk_matmul_reduction_at(threadIdx.y, base) = stride_sum;
+                }
 
-                inner_scalar_t val = valid_thread ? layout.qk_matmul_reduction_at(threadIdx.y, threadIdx.x) : inner_scalar_t(0);
                 // block归约
-                int32_t bound = ceil_pow2_u32(param.head_dim) / 2;
+                int32_t bound = ceil_pow2_u32(head_dim_thread_count) / 2;
                 for(; bound >= warpSize; bound /= 2) {
                     if (threadIdx.x < bound && threadIdx.y < param.q_chunk_size) {
-                        bool valid_pos = threadIdx.y < param.q_chunk_size && threadIdx.x + bound < param.head_dim;
-                        inner_scalar_t neighbor = valid_pos ? layout.qk_matmul_reduction_at(threadIdx.y, threadIdx.x + bound) : inner_scalar_t(0);
+                        bool valid_pos = threadIdx.y < param.q_chunk_size && threadIdx.x + bound < head_dim_thread_count;
+                        int64_t neighbor_pos = (threadIdx.x + bound) * K_X_STRIDE;
+                        inner_scalar_t neighbor = valid_pos ? layout.qk_matmul_reduction_at(threadIdx.y, neighbor_pos) : inner_scalar_t(0);
                         val = check_non_finite_val(val+neighbor, "qk_block_reduction");
-                        layout.qk_matmul_reduction_at(threadIdx.y, threadIdx.x) = val;
+                        layout.qk_matmul_reduction_at(threadIdx.y, base) = val;
                     }
                     __syncthreads();
                 }
                 if (threadIdx.x >= warpSize || threadIdx.y >= param.q_chunk_size) break;
+                int32_t subgroup = (head_dim_thread_count < warpSize) ? ceil_pow2_u32(head_dim_thread_count) : warpSize;
+                switch (subgroup) {
+                    case 32:
+                        val = check_non_finite_val(val + __shfl_down_sync(0xffffffff, val, 16, subgroup), "qk_warp_reduction");
+                        [[fallthrough]];    
+                    case 16:
+                        val = check_non_finite_val(val + __shfl_down_sync(0xffffffff, val, 8, subgroup), "qk_warp_reduction");
+                        [[fallthrough]];    
+                    case 8:
+                        val = check_non_finite_val(val + __shfl_down_sync(0xffffffff, val, 4, subgroup), "qk_warp_reduction");
+                        [[fallthrough]];    
+                    case 4:
+                        val = check_non_finite_val(val + __shfl_down_sync(0xffffffff, val, 2, subgroup), "qk_warp_reduction");
+                        [[fallthrough]];    
+                    case 2:
+                        val = check_non_finite_val(val + __shfl_down_sync(0xffffffff, val, 1, subgroup), "qk_warp_reduction");
+                        [[fallthrough]];    
+                    case 1:
+                        break;
+                    default:
+                        toy_flash_attn_assert(false);
+                }
 
-                val = check_non_finite_val(val + __shfl_down_sync(0xffffffff, val, 16), "qk_warp_reduction");
-                val = check_non_finite_val(val + __shfl_down_sync(0xffffffff, val, 8), "qk_warp_reduction");
-                val = check_non_finite_val(val + __shfl_down_sync(0xffffffff, val, 4), "qk_warp_reduction");
-                val = check_non_finite_val(val + __shfl_down_sync(0xffffffff, val, 2), "qk_warp_reduction");
-                val = check_non_finite_val(val + __shfl_down_sync(0xffffffff, val, 1), "qk_warp_reduction");
                 if (threadIdx.x == 0) {
                     bool valid_q_kv_pair = 
                         param.q_token_id() < param.q_seqlen() && layout.is_valid_kv(param.q_token_id(), kv_seq_id, q_kv_offset, kv_win);
@@ -466,88 +533,129 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
             } while(0);
         }
         {   // online softmax
-            bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.kv_chunk_size;
+            bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < kv_chunk_size_thread_count;
+            int64_t base = threadIdx.x * K_X_STRIDE;
             if(valid_thread) {     // load tile
-                layout.max_reduction_at(threadIdx.y, threadIdx.x) = 
-                    layout.score_reduction_at(threadIdx.y, threadIdx.x);
-                layout.sum_reduction_at(threadIdx.y, threadIdx.x) = 
-                    layout.score_reduction_at(threadIdx.y, threadIdx.x) != inner_scalar_t(-INFINITY) ?
-                            inner_scalar_t(1.0) : inner_scalar_t(0.0);
+                #pragma unroll
+                for(int64_t lane = 0; lane < K_X_STRIDE; lane++) {
+                    int64_t seq_off = base + lane;
+                    if (seq_off < param.kv_chunk_size) {
+                        layout.max_reduction_at(threadIdx.y, seq_off) = 
+                            layout.score_reduction_at(threadIdx.y, seq_off);
+                        layout.sum_reduction_at(threadIdx.y, seq_off) = 
+                            layout.score_reduction_at(threadIdx.y, seq_off) != inner_scalar_t(-INFINITY) ?
+                                    inner_scalar_t(1.0) : inner_scalar_t(0.0);
+                    }
+                }
             }
             __syncthreads();
 
-            inner_scalar_t max_ = valid_thread ?
-                layout.max_reduction_at(threadIdx.y, threadIdx.x) : inner_scalar_t(-INFINITY);
-            inner_scalar_t sum_ = valid_thread ?
-                layout.sum_reduction_at(threadIdx.y, threadIdx.x) : inner_scalar_t(0);
-            int32_t bound = ceil_pow2_u32(param.kv_chunk_size) / 2;
+            inner_scalar_t max_ = inner_scalar_t(-INFINITY);
+            inner_scalar_t sum_ = inner_scalar_t(0);
+            #pragma unroll
+            for(int64_t lane=0; lane <K_X_STRIDE; lane++) {
+                int64_t seq_off = base + lane;
+                if (seq_off < param.kv_chunk_size) {
+                    inner_scalar_t max_lane = valid_thread ?
+                        layout.max_reduction_at(threadIdx.y, seq_off) : inner_scalar_t(-INFINITY);
+                    inner_scalar_t sum_lane = valid_thread ?
+                        layout.sum_reduction_at(threadIdx.y, seq_off) : inner_scalar_t(0);
+                    inner_scalar_t max_merge = max(max_lane, max_);
+                    sum_ = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_lane_old")) + 
+                                            sum_lane * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_lane, max_merge), "softmax_sum_reduction_lane_new")), 
+                                            "softmax_sum_reduction_lane");
+                    max_ = max_merge;
+                }
+            }
+            if (valid_thread) {
+                layout.max_reduction_at(threadIdx.y, base) = max_;
+                layout.sum_reduction_at(threadIdx.y, base) = sum_;
+            }
+            __syncthreads();
+
+            int32_t bound = ceil_pow2_u32(kv_chunk_size_thread_count) / 2;
             for(; bound >= warpSize; bound /= 2) {  // block reduction
                 if (threadIdx.x < bound && threadIdx.y < param.q_chunk_size) {
-                    bool valid_neighbor = threadIdx.x + bound < param.kv_chunk_size && threadIdx.y < param.q_chunk_size;
+                    bool valid_neighbor = threadIdx.x + bound < kv_chunk_size_thread_count && threadIdx.y < param.q_chunk_size;
+                    int64_t neighbor_base = (threadIdx.x + bound) * K_X_STRIDE;
                     inner_scalar_t max_neighbor = valid_neighbor ?
-                        layout.max_reduction_at(threadIdx.y, threadIdx.x + bound) : inner_scalar_t(-INFINITY);
+                        layout.max_reduction_at(threadIdx.y, neighbor_base) : inner_scalar_t(-INFINITY);
                     inner_scalar_t sum_neighbor = valid_neighbor ? 
-                        layout.sum_reduction_at(threadIdx.y, threadIdx.x + bound) : inner_scalar_t(0.0);
+                        layout.sum_reduction_at(threadIdx.y, neighbor_base) : inner_scalar_t(0.0);
                     inner_scalar_t max_merge = max(max_, max_neighbor);
                     inner_scalar_t sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_block_old")) + 
                                             sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_block_new")), 
                                             "softmax_sum_reduction_block");
                     max_ = max_merge;
                     sum_ = sum_merge;
-                    layout.max_reduction_at(threadIdx.y, threadIdx.x) = max_;
-                    layout.sum_reduction_at(threadIdx.y, threadIdx.x) = sum_;
+                    layout.max_reduction_at(threadIdx.y, base) = max_;
+                    layout.sum_reduction_at(threadIdx.y, base) = sum_;
                 }
                 __syncthreads();
             }
             if (threadIdx.x < warpSize && threadIdx.y < param.q_chunk_size) {
+                int32_t subgroup = kv_chunk_size_thread_count < warpSize ? ceil_pow2_u32(kv_chunk_size_thread_count) : warpSize;
                 inner_scalar_t max_neighbor;
                 inner_scalar_t sum_neighbor;
                 inner_scalar_t max_merge;
                 inner_scalar_t sum_merge;
-                max_neighbor = __shfl_down_sync(0xffffffff, max_, 16);
-                sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 16);
-                max_merge = max(max_, max_neighbor);
-                sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
-                                            sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
-                                            "softmax_sum_reduction_warp");
-                max_ = max_merge;
-                sum_ = sum_merge;
 
-                max_neighbor = __shfl_down_sync(0xffffffff, max_, 8);
-                sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 8);
-                max_merge = max(max_, max_neighbor);
-                sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
-                                            sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
-                                            "softmax_sum_reduction_warp");
-                max_ = max_merge;
-                sum_ = sum_merge;
-
-                max_neighbor = __shfl_down_sync(0xffffffff, max_, 4);
-                sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 4);
-                max_merge = max(max_, max_neighbor);
-                sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
-                                            sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
-                                            "softmax_sum_reduction_warp");
-                max_ = max_merge;
-                sum_ = sum_merge;
-
-                max_neighbor = __shfl_down_sync(0xffffffff, max_, 2);
-                sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 2);
-                max_merge = max(max_, max_neighbor);
-                sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
-                                            sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
-                                            "softmax_sum_reduction_warp");
-                max_ = max_merge;
-                sum_ = sum_merge;
-
-                max_neighbor = __shfl_down_sync(0xffffffff, max_, 1);
-                sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 1);
-                max_merge = max(max_, max_neighbor);
-                sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
-                                            sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
-                                            "softmax_sum_reduction_warp");
-                max_ = max_merge;
-                sum_ = sum_merge;
+                switch(subgroup) {
+                    case 32:
+                        max_neighbor = __shfl_down_sync(0xffffffff, max_, 16, subgroup);
+                        sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 16, subgroup);
+                        max_merge = max(max_, max_neighbor);
+                        sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
+                                                    sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                                                    "softmax_sum_reduction_warp");
+                        max_ = max_merge;
+                        sum_ = sum_merge;
+                        [[fallthrough]];
+                    case 16:
+                        max_neighbor = __shfl_down_sync(0xffffffff, max_, 8, subgroup);
+                        sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 8, subgroup);
+                        max_merge = max(max_, max_neighbor);
+                        sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
+                                                    sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                                                    "softmax_sum_reduction_warp");
+                        max_ = max_merge;
+                        sum_ = sum_merge;
+                        [[fallthrough]];
+                    case 8:
+                        max_neighbor = __shfl_down_sync(0xffffffff, max_, 4, subgroup);
+                        sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 4, subgroup);
+                        max_merge = max(max_, max_neighbor);
+                        sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
+                                                    sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                                                    "softmax_sum_reduction_warp");
+                        max_ = max_merge;
+                        sum_ = sum_merge;
+                        [[fallthrough]];
+                    case 4:
+                        max_neighbor = __shfl_down_sync(0xffffffff, max_, 2, subgroup);
+                        sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 2, subgroup);
+                        max_merge = max(max_, max_neighbor);
+                        sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
+                                                    sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                                                    "softmax_sum_reduction_warp");
+                        max_ = max_merge;
+                        sum_ = sum_merge;
+                        [[fallthrough]];
+                    case 2:
+                        max_neighbor = __shfl_down_sync(0xffffffff, max_, 1, subgroup);
+                        sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 1, subgroup);
+                        max_merge = max(max_, max_neighbor);
+                        sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
+                                                    sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                                                    "softmax_sum_reduction_warp");
+                        max_ = max_merge;
+                        sum_ = sum_merge;
+                        [[fallthrough]];
+                    case 1:
+                        break;
+                    default:
+                        toy_flash_attn_assert(false);
+                }
 
                 if (threadIdx.x == 0) {
                     layout.max_reduction_at(threadIdx.y, 0) = max_;
@@ -571,63 +679,109 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
 
             if (valid_thread) { // block 广播max & sum, 回填softmax
                 inner_scalar_t max_ = layout.max_reduction_at(threadIdx.y, 0);
-                inner_scalar_t score = layout.score_reduction_at(threadIdx.y, threadIdx.x);
-                inner_scalar_t softmax = exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(score, max_), "softmax_exp_sub"));    // 去除sum除法
-                layout.softmax_reduction_at(threadIdx.y, threadIdx.x) = softmax;
+                #pragma unroll
+                for(int64_t lane=0; lane < K_X_STRIDE; lane++) {
+                    int64_t seq_off = base + lane;
+                    if (seq_off < param.kv_chunk_size) {
+                        inner_scalar_t score = layout.score_reduction_at(threadIdx.y, seq_off);
+                        inner_scalar_t softmax = exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(score, max_), "softmax_exp_sub"));    // 去除sum除法
+                        layout.softmax_reduction_at(threadIdx.y, seq_off) = softmax;
+                    }
+                }
             }
             __syncthreads();
         }
         {   // load V
-            bool valid_thread = threadIdx.y < param.kv_chunk_size && threadIdx.x < param.head_dim;
+            bool valid_thread = threadIdx.y < param.kv_chunk_size && threadIdx.x < head_dim_thread_count;
             int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + threadIdx.y;
             if (valid_thread) {
-                layout.v_t_at(threadIdx.x , threadIdx.y) = 
-                    (kv_seq_id < param.kv_seqlen()) ?
-                        param.v_at(kv_seq_id, threadIdx.x) : scalar_t(0);
+                int64_t base = threadIdx.x * K_X_STRIDE;
+                #pragma unroll 
+                for(int lane=0; lane < K_X_STRIDE; lane++) {
+                    int64_t head_pos = base + lane;
+                    if (head_pos < param.head_dim) {
+                        layout.v_t_at(head_pos , threadIdx.y) = 
+                            (kv_seq_id < param.kv_seqlen()) ?
+                                param.v_at(kv_seq_id, head_pos) : scalar_t(0);
+                    }
+                }
             }
             __syncthreads();
         }
         for(int64_t head_off = 0; head_off < param.head_dim; head_off++) {
-            // TODO: 这里可以提高并行度， softmax chunk通常比较小(q_chunk_size * kv_chunk_size) = （8 * 8）,head dim比较大(64/128)
-            bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.kv_chunk_size;
+            bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < kv_chunk_size_thread_count;
             if (valid_thread) {
                 // 乘法低的精度，加法高精度
-                scalar_t s = static_cast<scalar_t>(layout.softmax_reduction_at(threadIdx.y, threadIdx.x));
-                inner_scalar_t v = layout.v_t_at(head_off, threadIdx.x);
-                inner_scalar_t val = check_non_finite_val(s * v, "softmax_mul_v");
-                layout.sv_matmul_reduction_at(threadIdx.y, threadIdx.x) = inner_scalar_t(val);
+                int64_t base = threadIdx.x * K_X_STRIDE;
+                #pragma unroll
+                for(int64_t lane=0; lane < K_X_STRIDE; lane++) {
+                    int64_t seq_off = base + lane;
+                    if (seq_off < param.kv_chunk_size) {
+                        scalar_t s = static_cast<scalar_t>(layout.softmax_reduction_at(threadIdx.y, seq_off));
+                        inner_scalar_t v = layout.v_t_at(head_off, seq_off);
+                        inner_scalar_t val = check_non_finite_val(s * v, "softmax_mul_v");
+                        layout.sv_matmul_reduction_at(threadIdx.y, seq_off) = inner_scalar_t(val);
+                    }
+                }
             }
             __syncthreads();
 
             {   // softmax dot V block reduction
-                int64_t bound = ceil_pow2_u32(param.kv_chunk_size)/2;
-                inner_scalar_t out = valid_thread ? layout.sv_matmul_reduction_at(threadIdx.y, threadIdx.x) : inner_scalar_t(0);
+                int64_t base = threadIdx.x * K_X_STRIDE;
+                inner_scalar_t out = inner_scalar_t(0);
+                #pragma unroll
+                for(int64_t lane=0; lane<K_X_STRIDE; lane++) {
+                    int64_t seq_off = base + lane;
+                    if (seq_off < param.kv_chunk_size) {
+                        inner_scalar_t out_lane = valid_thread ? layout.sv_matmul_reduction_at(threadIdx.y, seq_off) : inner_scalar_t(0);
+                        out = check_non_finite_val(out + out_lane, "out_reduction_lane");
+                    }
+                }
+                if (valid_thread) {
+                    layout.sv_matmul_reduction_at(threadIdx.y, base) = out;
+                }
+
+                int64_t bound = ceil_pow2_u32(kv_chunk_size_thread_count)/2;
                 for(; bound >= warpSize; bound /= 2) {  // unlikely逻辑， 这里大概率不会走到
                     if (threadIdx.x < bound && threadIdx.y < param.q_chunk_size) {
-                        inner_scalar_t out_neighbor = (threadIdx.x + bound < param.kv_chunk_size) ? 
-                            layout.sv_matmul_reduction_at(threadIdx.y, threadIdx.x + bound) : inner_scalar_t(0);
+                        int64_t neighbor_base = (threadIdx.x + bound) * K_X_STRIDE;
+                        inner_scalar_t out_neighbor = (threadIdx.x + bound < kv_chunk_size_thread_count) ? 
+                            layout.sv_matmul_reduction_at(threadIdx.y, neighbor_base) : inner_scalar_t(0);
                         out = check_non_finite_val(out + out_neighbor, "out_reduction_block");
-                        layout.sv_matmul_reduction_at(threadIdx.y, threadIdx.x) = out;
+                        layout.sv_matmul_reduction_at(threadIdx.y, base) = out;
                     }
                     __syncthreads();
                 }
                 // softmax dot V warp reduction
                 if (threadIdx.x < warpSize && threadIdx.y < param.q_chunk_size) {
+                    int64_t subgroup = kv_chunk_size_thread_count < warpSize ? ceil_pow2_u32(kv_chunk_size_thread_count) : warpSize;
                     inner_scalar_t out_neighbor;
-                    out_neighbor = __shfl_down_sync(0xffffffff, out, 16);
-                    out = check_non_finite_val(out + out_neighbor, "out_reduction_warp");
-
-                    out_neighbor = __shfl_down_sync(0xffffffff, out, 8);
-                    out = check_non_finite_val(out + out_neighbor, "out_reduction_warp");
-
-                    out_neighbor = __shfl_down_sync(0xffffffff, out, 4);
-                    out = check_non_finite_val(out + out_neighbor, "out_reduction_warp");
-
-                    out_neighbor = __shfl_down_sync(0xffffffff, out, 2);
-                    out = check_non_finite_val(out + out_neighbor, "out_reduction_warp");
-
-                    out_neighbor = __shfl_down_sync(0xffffffff, out, 1);
-                    out = check_non_finite_val(out + out_neighbor, "out_reduction_warp");
+                    switch(subgroup) {
+                        case 32:
+                            out_neighbor = __shfl_down_sync(0xffffffff, out, 16, subgroup);
+                            out = check_non_finite_val(out + out_neighbor, "out_reduction_warp");
+                            [[fallthrough]];
+                        case 16:
+                            out_neighbor = __shfl_down_sync(0xffffffff, out, 8, subgroup);
+                            out = check_non_finite_val(out + out_neighbor, "out_reduction_warp");
+                            [[fallthrough]];
+                        case 8:
+                            out_neighbor = __shfl_down_sync(0xffffffff, out, 4, subgroup);
+                            out = check_non_finite_val(out + out_neighbor, "out_reduction_warp");
+                            [[fallthrough]];
+                        case 4:
+                            out_neighbor = __shfl_down_sync(0xffffffff, out, 2, subgroup);
+                            out = check_non_finite_val(out + out_neighbor, "out_reduction_warp");
+                            [[fallthrough]];
+                        case 2:
+                            out_neighbor = __shfl_down_sync(0xffffffff, out, 1, subgroup);
+                            out = check_non_finite_val(out + out_neighbor, "out_reduction_warp");
+                            [[fallthrough]];
+                        case 1:
+                            break;
+                        default:
+                            toy_flash_attn_assert(false);
+                    }
                     
                     if (threadIdx.x == 0) {
                         layout.out_reduction_at(threadIdx.y, head_off) = out;
@@ -651,25 +805,34 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
         }
 
         {   // out reduction
-            bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim;
+            bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < head_dim_thread_count;
             inner_scalar_t merge_m, merge_sum;
             if (valid_thread) {
-                inner_scalar_t old_e = inner_scalar_t(layout.out_at(threadIdx.y, threadIdx.x));
-                inner_scalar_t new_e = inner_scalar_t(layout.out_reduction_at(threadIdx.y, threadIdx.x));
-                inner_scalar_t old_m = layout.last_chunk_max_at(threadIdx.y);
-                inner_scalar_t old_sum = layout.last_chunk_sum_at(threadIdx.y);
                 inner_scalar_t new_m = layout.max_reduction_at(threadIdx.y, 0);
                 inner_scalar_t new_sum = layout.sum_reduction_at(threadIdx.y, 0);
+                inner_scalar_t old_m = layout.last_chunk_max_at(threadIdx.y);
+                inner_scalar_t old_sum = layout.last_chunk_sum_at(threadIdx.y);
+
                 merge_m = max(old_m, new_m);
                 merge_sum = check_non_finite_val(
                         old_sum * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(old_m, merge_m), "softmax_chunk_reduction_sum_old_sub")) + 
                         new_sum * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(new_m, merge_m), "softmax_chunk_reduction_sum_new_sub"))
                     , "softmax_chunk_reduction_sum");
-                inner_scalar_t merge_e = check_non_finite_val(
-                        old_e * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(old_m, merge_m), "out_chunk_reduction_old_sub")) +
-                        new_e * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(new_m, merge_m), "out_chunk_reduction_new_sub"))  
-                    , "out_chunk_reduction");       // 去除sum除法，统一到最后
-                layout.out_at(threadIdx.y, threadIdx.x) = merge_e;
+                
+                int64_t base = threadIdx.x * K_X_STRIDE;
+                #pragma unroll
+                for(int64_t lane=0; lane < K_X_STRIDE; lane++) {
+                    int64_t head_pos = base + lane;
+                    if (head_pos < param.head_dim) {
+                        inner_scalar_t old_e = inner_scalar_t(layout.out_at(threadIdx.y, head_pos));
+                        inner_scalar_t new_e = inner_scalar_t(layout.out_reduction_at(threadIdx.y, head_pos));
+                        inner_scalar_t merge_e = check_non_finite_val(
+                                old_e * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(old_m, merge_m), "out_chunk_reduction_old_sub")) +
+                                new_e * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(new_m, merge_m), "out_chunk_reduction_new_sub"))  
+                            , "out_chunk_reduction");       // 去除sum除法，统一到最后
+                        layout.out_at(threadIdx.y, head_pos) = merge_e;
+                    }
+                }
 #ifdef DEBUG_FLASH_ATTN_V3_TRACE
                 if (debug_row && threadIdx.x == 0) {
                     printf(
@@ -702,11 +865,18 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
         __syncthreads();
     } 
     {   // write back out
-        bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < param.head_dim;
+        bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < head_dim_thread_count;
         if (param.q_token_id() < param.q_seqlen() && valid_thread) {
-            inner_scalar_t val = layout.out_at(threadIdx.y, threadIdx.x);
-            inner_scalar_t merge_sum = layout.last_chunk_sum_at(threadIdx.y);
-            param.out_at(param.q_token_id(), threadIdx.x) = scalar_t(softmax_div(val, merge_sum));
+            int64_t base = threadIdx.x * K_X_STRIDE;
+            #pragma unroll
+            for(int64_t lane=0; lane < K_X_STRIDE; lane++) {
+                int64_t head_pos = base + lane;
+                if (head_pos < param.head_dim) {
+                    inner_scalar_t val = layout.out_at(threadIdx.y, head_pos);
+                    inner_scalar_t merge_sum = layout.last_chunk_sum_at(threadIdx.y);
+                    param.out_at(param.q_token_id(), head_pos) = scalar_t(softmax_div(val, merge_sum));
+                }
+            }
         }
     }
 }
@@ -761,9 +931,12 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t>::flash_attn_varlen_with_b
 
     assert(head_dim <= 128);        // 泛化
 
-    int block_row = 8;  // 先写死调试用
-    dim3 block(head_dim, block_row);
-    dim3 grid(batch_size, (max_seqlen_q + block_row - 1)/block_row, num_heads);
+    int q_chunk_size = 8;
+    int kv_chunk_size = 64;
+    int blockX = (head_dim + K_X_STRIDE - 1) / K_X_STRIDE;
+    int blockY = 64; // 固定为64
+    dim3 block(blockX, blockY);
+    dim3 grid(batch_size, (max_seqlen_q + q_chunk_size - 1)/q_chunk_size, num_heads);
 
     ParamSet param = {
         .q = q.const_data_ptr<scalar_t>(),
@@ -784,8 +957,8 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t>::flash_attn_varlen_with_b
         .head_dim = head_dim,
         .block_size = block_size,
         .causal = causal,
-        .q_chunk_size = block_row,
-        .kv_chunk_size = block_row
+        .q_chunk_size = q_chunk_size,
+        .kv_chunk_size = kv_chunk_size
     };
     kernel_wrapper<scalar_t, inner_scalar_t><<<grid, block, TileLayout::size(param)>>>(param);
 

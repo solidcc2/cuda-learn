@@ -137,6 +137,16 @@ _ops = load(
     verbose=True,
 )
 
+# _ops = load(
+#     name="toy_torch_flash_attention_func",
+#     sources=[
+#         str(_THIS_DIR / "flash_attn_func_v3.cu"),
+#     ],
+#     extra_cflags=["-O2"],
+#     extra_cuda_cflags=["-O2"],
+#     verbose=True,
+# )
+
 # layout: (2, num_blocks, block_size, num_kv_heads, head_size)
 def flash_attn_varlen_func(
     q: torch.Tensor,    # NHD： total_q x num_head x head_dim
