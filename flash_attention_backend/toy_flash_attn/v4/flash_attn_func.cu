@@ -391,6 +391,22 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
     };
 
     const int64_t q_kv_offset = param.q_seqlen() - param.kv_seqlen();
+    const int64_t q_chunk_first = blockIdx.y * param.q_chunk_size;
+    const int64_t q_chunk_last = min(q_chunk_first + param.q_chunk_size, param.q_seqlen()) - 1;
+    int64_t kv_seq_begin = 0;
+    int64_t kv_seq_end = 0;
+    if (q_chunk_first <= q_chunk_last) {
+        // Per q-chunk we first compute the union of all reachable KV positions,
+        // then only visit the overlapping kv chunks. Fine-grained masking stays below.
+        kv_seq_begin = max(int64_t(0), q_chunk_first - q_kv_offset - kv_win[0]);
+        kv_seq_end = min(param.kv_seqlen(), q_chunk_last - q_kv_offset + 1 + kv_win[1]);
+        if (!param.causal && param.window_size[0] == -1 && param.window_size[1] == -1) {
+            kv_seq_begin = 0;
+            kv_seq_end = param.kv_seqlen();
+        }
+    }
+    const int64_t kv_chunk_begin = kv_seq_begin / param.kv_chunk_size;
+    const int64_t kv_chunk_end = (kv_seq_end + param.kv_chunk_size - 1) / param.kv_chunk_size;
     {   // load q chunk 
         bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < head_dim_thread_count;
         if (valid_thread) {
@@ -408,9 +424,8 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
         __syncthreads();
     }
 
-    // TODO: kv_chunk的有效边界是远大于win size的，这里可以剪枝
-    for(int64_t kv_chunk_id = 0; 
-            kv_chunk_id < (param.kv_seqlen() + param.kv_chunk_size - 1) / param.kv_chunk_size; kv_chunk_id++) {
+    for(int64_t kv_chunk_id = kv_chunk_end - 1;
+            kv_chunk_id >= kv_chunk_begin; kv_chunk_id--) {
         {   // kv_seq_id 作用域 for k tile load
             int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + threadIdx.y;
             bool valid_thread = threadIdx.y < param.kv_chunk_size && threadIdx.x < head_dim_thread_count;
@@ -429,7 +444,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
         }
 
         // Q K matmul
-        for(int kv_chunk_off = 0; kv_chunk_off <param.kv_chunk_size; kv_chunk_off ++) {
+        for(int64_t kv_chunk_off = param.kv_chunk_size - 1; kv_chunk_off >= 0; kv_chunk_off--) {
             int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + kv_chunk_off;
             {   // QK 对位乘
                 bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < head_dim_thread_count;
