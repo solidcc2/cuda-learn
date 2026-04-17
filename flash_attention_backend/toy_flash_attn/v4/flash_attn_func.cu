@@ -23,6 +23,9 @@ __global__ void kernel_wrapper(
 template<typename scalar_t, typename inner_scalar_t>
 struct FlashAttnTrait {
     static const int32_t K_X_STRIDE=16;  // x 维度每线程处理16个数
+    static const int32_t Q_CHUNK_SIZE = 8;
+    static const int32_t KV_CHUNK_SIZE = 64;
+    static const int32_t BLOCK_Y = 64;
     struct ParamSet;
     struct TileLayout;
     static __device__ void kernel(ParamSet& param);
@@ -946,10 +949,10 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t>::flash_attn_varlen_with_b
 
     assert(head_dim <= 128);        // 泛化
 
-    int q_chunk_size = 8;
-    int kv_chunk_size = 64;
+    int q_chunk_size = Q_CHUNK_SIZE;
+    int kv_chunk_size = KV_CHUNK_SIZE;
     int blockX = (head_dim + K_X_STRIDE - 1) / K_X_STRIDE;
-    int blockY = 64; // 固定为64
+    int blockY = BLOCK_Y;
     dim3 block(blockX, blockY);
     dim3 grid(batch_size, (max_seqlen_q + q_chunk_size - 1)/q_chunk_size, num_heads);
 
