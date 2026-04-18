@@ -343,6 +343,34 @@ def _qkv_hash(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> str:
         h.update(_tensor_bytes(x))
     return h.hexdigest()[:16]
 
+def _effective_qkv_hash(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seqused_k: torch.Tensor,
+    block_table: torch.Tensor,
+) -> str:
+    h = hashlib.sha1()
+    block_size = k.shape[1]
+
+    batch_size = len(seqused_k)
+    for batch_id in range(batch_size):
+        q_begin = cu_seqlens_q[batch_id].item()
+        q_end = cu_seqlens_q[batch_id + 1].item()
+        kv_len = seqused_k[batch_id].item()
+
+        q_slice = q[q_begin:q_end]
+        h.update(_qkv_hash(q_slice, q_slice.new_empty((0,)), q_slice.new_empty((0,))).encode())
+
+        phy_block_ids = [block_table[batch_id][seq_id // block_size] for seq_id in range(kv_len)]
+        offsets = [seq_id % block_size for seq_id in range(kv_len)]
+        k_slice = k[phy_block_ids, offsets]
+        v_slice = v[phy_block_ids, offsets]
+        h.update(_qkv_hash(k_slice, v_slice, k_slice.new_empty((0,))).encode())
+
+    return h.hexdigest()[:16]
+
 def flash_attn_varlen_with_block_cu_bf16(
     q: torch.Tensor,    # total_q x num_head x head_dim
     k: torch.Tensor,    # NHD： num_blocks x block_size x num_head x head_dim
@@ -404,12 +432,13 @@ def flash_attn_varlen_with_block_cu_bf16(
     # k = k.to(dtype=torch.float32)
     # v = v.to(dtype=torch.float32)
     # out = out.to(dtype=torch.float32)
+    turn_hash = _effective_qkv_hash(q, k, v, cu_seqlens_q, seqused_k, block_table)
 
-    out = _ops.flash_attn_varlen_with_block_v4_bf16fp32(q, k, v, 
+    op_out = _ops.flash_attn_varlen_with_block_v4_bf16fp32(q, k, v,
                                     max_seqlen_q, cu_seqlens_q,
                                     max_seqlen_k, seqused_k,
                                     causal, window_size[0], window_size[1],
-                                    block_table, 
+                                    block_table,
                                     out)
     _maybe_dump_flash_attn_context(
         "with_block_cu",
@@ -424,13 +453,18 @@ def flash_attn_varlen_with_block_cu_bf16(
         window_size=window_size,
         block_table=block_table,
         debug_meta=_layer_debug_meta(layer),
-        result=out,
+        result=op_out,
     )
-    turn_hash = _qkv_hash(q, k, v)
+    if op_out.data_ptr() != out.data_ptr():
+        out.copy_(op_out.to(dtype=out.dtype))
+    torch.cuda.synchronize(q.device)
+    output_hash = _tensor_hash(out)
     print(f"[turn hash] {turn_hash}", flush=True)
+    print(f"[output hash] {output_hash}", flush=True)
     print("======================= turn end =====================", flush=True)
+    os._exit(0)
 
-    return out.to(dtype=_CUDA_VALUE_DTYPE)
+    return out
 
 def flash_attn_varlen_with_block_cu_fp32(
     q: torch.Tensor,    # total_q x num_head x head_dim
@@ -489,22 +523,23 @@ def flash_attn_varlen_with_block_cu_fp32(
         expected_dtype=_CUDA_INDEX_DTYPE,
     )
     _check_cuda_tensor("out", out, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
-    q = q.to(dtype=torch.float32)
-    k = k.to(dtype=torch.float32)
-    v = v.to(dtype=torch.float32)
-    out = out.to(dtype=torch.float32)
+    turn_hash = _effective_qkv_hash(q, k, v, cu_seqlens_q, seqused_k, block_table)
+    q_fp32 = q.to(dtype=torch.float32)
+    k_fp32 = k.to(dtype=torch.float32)
+    v_fp32 = v.to(dtype=torch.float32)
+    out_fp32 = torch.empty_like(q_fp32)
 
-    out = _ops.flash_attn_varlen_with_block_v4_fp32fp32(q, k, v, 
+    op_out = _ops.flash_attn_varlen_with_block_v4_fp32fp32(q_fp32, k_fp32, v_fp32,
                                     max_seqlen_q, cu_seqlens_q,
                                     max_seqlen_k, seqused_k,
                                     causal, window_size[0], window_size[1],
-                                    block_table, 
-                                    out)
+                                    block_table,
+                                    out_fp32)
     _maybe_dump_flash_attn_context(
         "with_block_cu",
-        q=q,
-        k=k,
-        v=v,
+        q=q_fp32,
+        k=k_fp32,
+        v=v_fp32,
         max_seqlen_q=max_seqlen_q,
         cu_seqlens_q=cu_seqlens_q,
         max_seqlen_k=max_seqlen_k,
@@ -513,11 +548,13 @@ def flash_attn_varlen_with_block_cu_fp32(
         window_size=window_size,
         block_table=block_table,
         debug_meta=_layer_debug_meta(layer),
-        result=out,
+        result=op_out,
     )
-    
-    turn_hash = _qkv_hash(q, k, v)
+    out.copy_(op_out.to(dtype=out.dtype))
+    torch.cuda.synchronize(q.device)
+    output_hash = _tensor_hash(out)
     print(f"[turn hash] {turn_hash}", flush=True)
+    print(f"[output hash] {output_hash}", flush=True)
     print("======================= turn end =====================", flush=True)
-
-    return out.to(dtype=_CUDA_VALUE_DTYPE)
+    os._exit(0)
+    return out
