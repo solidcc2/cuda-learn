@@ -13,7 +13,9 @@ OUTPUT_HASH_RE = re.compile(r"\[output hash\]\s+(?P<hash>[0-9a-f]+)")
 VALUE_RE = re.compile(
     r"(?P<key>\(\d+,\s*\d+,\s*\d+\)\s+q=\d+\s+kv_chunk=\d+"
     r"(?:\s+kv_off=\d+\s+kv_seq=\d+)?\s+"
-    r"(?:q_elem\[0\]\[0\]|k_elem\[0\]\[0\]|QK dot\[0\]\[0\]|score\[0\]\[0\]|max\[0\]\[0\]|sum\[0\]\[0\]|out_tile\[0\]\[0\])):\s+"
+    r"(?:q_elem\[\d+\]\[\d+\]|k_elem\[\d+\]\[\d+\]|QK dot\[\d+\]\[\d+\]|"
+    r"score\[\d+\]\[\d+\]|max\[\d+\]\[0\]|sum\[\d+\]\[0\]|softmax\[\d+\]\[\d+\]|"
+    r"sv_matmul\[\d+\]\[\d+\]\[\d+\]|out_tile\[\d+\]\[\d+\])):\s+"
     r"(?P<value>[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
 )
 

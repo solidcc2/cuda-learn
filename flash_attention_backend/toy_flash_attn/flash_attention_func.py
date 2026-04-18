@@ -133,7 +133,7 @@ _ops = load(
         str(_THIS_DIR / "v4"),
     ],
     extra_cflags=["-O2"],
-    extra_cuda_cflags=["-O2"],
+    extra_cuda_cflags=["-O0", "-G"],
     verbose=True,
 )
 
