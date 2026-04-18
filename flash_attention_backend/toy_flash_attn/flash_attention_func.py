@@ -462,7 +462,7 @@ def flash_attn_varlen_with_block_cu_bf16(
     print(f"[turn hash] {turn_hash}", flush=True)
     print(f"[output hash] {output_hash}", flush=True)
     print("======================= turn end =====================", flush=True)
-    os._exit(0)
+    # os._exit(0)
 
     return out
 
@@ -556,5 +556,5 @@ def flash_attn_varlen_with_block_cu_fp32(
     print(f"[turn hash] {turn_hash}", flush=True)
     print(f"[output hash] {output_hash}", flush=True)
     print("======================= turn end =====================", flush=True)
-    os._exit(0)
+    # os._exit(0)
     return out

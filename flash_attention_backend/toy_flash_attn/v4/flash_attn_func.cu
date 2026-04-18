@@ -793,8 +793,14 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
                 for(int64_t lane=0; lane < K_X_STRIDE; lane++) {
                     int64_t seq_off = base + lane;
                     if (seq_off < param.kv_chunk_size) {
+                        int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + seq_off;
+                        bool valid_q_kv_pair =
+                            param.q_token_id() < param.q_seqlen() &&
+                            layout.is_valid_kv(param.q_token_id(), kv_seq_id, q_kv_offset, kv_win);
                         inner_scalar_t score = layout.score_reduction_at(threadIdx.y, seq_off);
-                        inner_scalar_t softmax = exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(score, max_), "softmax_exp_sub"));    // 去除sum除法
+                        inner_scalar_t softmax = valid_q_kv_pair
+                            ? exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(score, max_), "softmax_exp_sub"))
+                            : inner_scalar_t(0);
                         layout.softmax_reduction_at(threadIdx.y, seq_off) = softmax;
                     }
                 }
@@ -842,33 +848,39 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
                 for(int64_t lane=0; lane < K_X_STRIDE; lane++) {
                     int64_t seq_off = base + lane;
                     if (seq_off < param.kv_chunk_size) {
+                        int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + seq_off;
+                        bool valid_q_kv_pair =
+                            param.q_token_id() < param.q_seqlen() &&
+                            layout.is_valid_kv(param.q_token_id(), kv_seq_id, q_kv_offset, kv_win);
                         // scalar_t s = static_cast<scalar_t>(layout.softmax_reduction_at(threadIdx.y, seq_off));
                         inner_scalar_t s = layout.softmax_reduction_at(threadIdx.y, seq_off);
                         inner_scalar_t v = layout.v_t_at(head_off, seq_off);
-                        inner_scalar_t val = check_non_finite_val(valid_mul(s, v), "softmax_mul_v");
+                        inner_scalar_t val = valid_q_kv_pair
+                            ? check_non_finite_val(s * v, "softmax_mul_v")
+                            : inner_scalar_t(0);
                         layout.sv_matmul_reduction_at(threadIdx.y, seq_off) = inner_scalar_t(val);
                     }
                 }
             }
             __syncthreads();
-            for (int64_t seq_off = 0; seq_off < param.kv_chunk_size; seq_off++) {
-                busy_wait(1e6);
-                if (threadIdx.x == 0 && threadIdx.y < param.q_chunk_size) {
-                    printf(
-                        "(%u, %u, %u) q=%lld kv_chunk=%lld sv_matmul[%lld][%lld][%lld]: %f\n",
-                        (unsigned)blockIdx.x,
-                        (unsigned)blockIdx.y,
-                        (unsigned)blockIdx.z,
-                        (long long)param.q_token_id(),
-                        (long long)kv_chunk_id,
-                        (long long)threadIdx.y,
-                        (long long)seq_off,
-                        (long long)head_off,
-                        (double)layout.sv_matmul_reduction_at(threadIdx.y, seq_off)
-                    );
-                }
-                __syncthreads();
-            }
+            // for (int64_t seq_off = 0; seq_off < param.kv_chunk_size; seq_off++) {
+            //     busy_wait(1e6);
+            //     if (threadIdx.x == 0 && threadIdx.y < param.q_chunk_size) {
+            //         printf(
+            //             "(%u, %u, %u) q=%lld kv_chunk=%lld sv_matmul[%lld][%lld][%lld]: %f\n",
+            //             (unsigned)blockIdx.x,
+            //             (unsigned)blockIdx.y,
+            //             (unsigned)blockIdx.z,
+            //             (long long)param.q_token_id(),
+            //             (long long)kv_chunk_id,
+            //             (long long)threadIdx.y,
+            //             (long long)seq_off,
+            //             (long long)head_off,
+            //             (double)layout.sv_matmul_reduction_at(threadIdx.y, seq_off)
+            //         );
+            //     }
+            //     __syncthreads();
+            // }
 
             {   // softmax dot V block reduction
                 int64_t base = threadIdx.x * K_X_STRIDE;
