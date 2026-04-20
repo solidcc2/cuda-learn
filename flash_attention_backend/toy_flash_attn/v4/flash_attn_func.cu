@@ -5,10 +5,12 @@
 #include <cassert>
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <cuda_bf16.h>
 #include <string>
 #include <limits>
 
 #include "helper.h"
+#include "torch/headeronly/util/BFloat16.h"
 
 template<typename scalar_t, typename inner_scalar_t>
 struct FlashAttnTrait;
@@ -71,13 +73,11 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t>::ParamSet {
     const scalar_t* q;    // total_q x num_heads x head_dim
     const scalar_t* k;    // num_blocks x block_size x num_kv_heads x head_dim
     const scalar_t* v;
-    scalar_t* out;   // assert out_layout == q_layout
-    union {
-        int64_t q_stride[3];  
-        int64_t out_stride[3];  
-    };
+    scalar_t* out;
+    int64_t q_stride[3];  
     int64_t k_stride[4];
     int64_t v_stride[4];
+    int64_t out_stride[3];  
     int64_t max_seqlen_q;
     const int32_t* cu_seqlens_q;  // batch_size + 1
     int64_t max_seqlen_k;
@@ -864,7 +864,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
             }
             __syncthreads();
             // for (int64_t seq_off = 0; seq_off < param.kv_chunk_size; seq_off++) {
-            //     busy_wait(1e6);
+            //     busy_wait(1e7);
             //     if (threadIdx.x == 0 && threadIdx.y < param.q_chunk_size) {
             //         printf(
             //             "(%u, %u, %u) q=%lld kv_chunk=%lld sv_matmul[%lld][%lld][%lld]: %f\n",
@@ -1018,10 +1018,27 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
                 layout.last_chunk_sum_at(threadIdx.y) = merge_sum;
             }
             __syncthreads();
+
+            // if (valid_thread && threadIdx.x == 0) {
+            //     busy_wait(1e8);
+            //     printf(
+            //         "(%u, %u, %u) q=%lld kv_chunk=%lld last_chunk_sum[%lld]: %f\n",
+            //         (unsigned)blockIdx.x,
+            //         (unsigned)blockIdx.y,
+            //         (unsigned)blockIdx.z,
+            //         (long long)param.q_token_id(),
+            //         (long long)kv_chunk_id,
+            //         (long long)threadIdx.y,
+            //         (double)layout.last_chunk_sum_at(threadIdx.y)
+            //     );
+            // }
+            // __syncthreads();
+
             // if (valid_thread) {
             //     int64_t base = threadIdx.x * K_X_STRIDE;
             //     #pragma unroll
             //     for (int64_t lane = 0; lane < K_X_STRIDE; lane++) {
+            //         busy_wait(1e8);
             //         int64_t head_pos = base + lane;
             //         if (head_pos < param.head_dim) {
             //             printf(
@@ -1038,6 +1055,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
             //         }
             //     }
             // }
+            // __syncthreads();
         }
         __syncthreads();
     } 
@@ -1047,14 +1065,54 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
             int64_t base = threadIdx.x * K_X_STRIDE;
             #pragma unroll
             for(int64_t lane=0; lane < K_X_STRIDE; lane++) {
+                // busy_wait(1e8);
                 int64_t head_pos = base + lane;
                 if (head_pos < param.head_dim) {
                     inner_scalar_t val = layout.out_at(threadIdx.y, head_pos);
                     inner_scalar_t merge_sum = layout.last_chunk_sum_at(threadIdx.y);
+                    // inner_scalar_t div_val = softmax_div(val, merge_sum);
+                    // scalar_t out_val = scalar_t(div_val);
+	                //     param.out_at(param.q_token_id(), head_pos) = out_val;
+	                    // printf(
+	                    //     "(%u, %u, %u) q=%lld writeback[%lld][%lld]: val=%f merge_sum=%f div_val=%f out_val=%f\n",
+	                    //     (unsigned)blockIdx.x,
+	                    //     (unsigned)blockIdx.y,
+	                    //     (unsigned)blockIdx.z,
+	                    //     (long long)param.q_token_id(),
+	                    //     (long long)threadIdx.y,
+	                    //     (long long)head_pos,
+	                    //     (double)val,
+	                    //     (double)merge_sum,
+	                    //     (double)div_val,
+	                    //     (double)at::BFloat16(out_val)
+	                    // );
                     param.out_at(param.q_token_id(), head_pos) = scalar_t(softmax_div(val, merge_sum));
                 }
             }
         }
+        // __syncthreads();
+        // if (param.q_token_id() < param.q_seqlen() && valid_thread) {
+        //     int64_t base = threadIdx.x * K_X_STRIDE;
+        //     #pragma unroll
+	    //         for(int64_t lane=0; lane < K_X_STRIDE; lane++) {
+	    //             busy_wait(1e8);
+	    //             int64_t head_pos = base + lane;
+	    //             if (head_pos < param.head_dim) {
+	    //                 scalar_t param_out_val = param.out_at(param.q_token_id(), head_pos);
+	    //                 printf(
+	    //                     "(%u, %u, %u) q=%lld param_out[%lld][%lld]: %f\n",
+	    //                     (unsigned)blockIdx.x,
+	    //                     (unsigned)blockIdx.y,
+	    //                     (unsigned)blockIdx.z,
+	    //                     (long long)param.q_token_id(),
+	    //                     (long long)threadIdx.y,
+	    //                     (long long)head_pos,
+	    //                     (double)at::BFloat16(param_out_val)
+	    //                 );
+	    //             }
+	    //         }
+	    //     }
+
     }
 }
 template<typename scalar_t, typename inner_scalar_t>
@@ -1071,7 +1129,6 @@ void FlashAttnTrait<scalar_t, inner_scalar_t>::check_inputs(
     int64_t window_size_right,
     torch::Tensor block_table,
     torch::Tensor out) {
-
     TORCH_CHECK(q.sizes() == out.sizes(), "q and out must have the same shape");
     TORCH_CHECK(q.size(1) == k.size(2), "GQA not support, num_head must equal num_kv_head");
 } 
@@ -1123,6 +1180,7 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t>::flash_attn_varlen_with_b
         .q_stride = {q.stride(0), q.stride(1), q.stride(2)},
         .k_stride = {k.stride(0), k.stride(1), k.stride(2), k.stride(3)},
         .v_stride = {v.stride(0), v.stride(1), v.stride(2), v.stride(3)},
+        .out_stride = {out.stride(0), out.stride(1), out.stride(2)},
         .max_seqlen_q = max_seqlen_q,
         .cu_seqlens_q = cu_seqlens_q.const_data_ptr<int32_t>(),
         .max_seqlen_k = max_seqlen_k,

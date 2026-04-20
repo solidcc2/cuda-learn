@@ -13,6 +13,14 @@
 7. 充分的c++ {}block, 减少变量作用域，便于尽早收敛错误。
 
 ## Dev Log
+### 20260420
+集成数值对拍通过，fp32 & bf16结果一致。
+
+> input: Please introduce yourself in one short paragraph.
+> generate: "I am a former student of the University of California, Berkeley. I am a member of the Board of Trustees of the University of California,
+
+之前bug原因：默认了q和out的stride一致，在fp32上巧合正确，bf16上出错，不再union后正确。
+
 ### 20260418
 1. 做逐个步骤的数值对比。发现问题并解决：
     - wrapper内结果直接返回，没有回写传入out, 但是vllm引擎似乎主要依赖out。写回out后，fp32版本token响应正确，语义有效。

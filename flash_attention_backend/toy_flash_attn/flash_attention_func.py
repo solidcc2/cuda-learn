@@ -334,6 +334,18 @@ def _tensor_bytes(t: torch.Tensor) -> bytes:
 def _tensor_hash(t: torch.Tensor) -> str:
     return hashlib.sha1(_tensor_bytes(t)).hexdigest()[:16]
 
+def _effective_out_hash(out: torch.Tensor, cu_seqlens_q: torch.Tensor) -> str:
+    h = hashlib.sha1()
+    cu = cu_seqlens_q.detach().cpu()
+    for batch_id in range(cu.numel() - 1):
+        begin = cu[batch_id].item()
+        end = cu[batch_id + 1].item()
+        out_slice = out[begin:end]
+        h.update(str(out_slice.dtype).encode())
+        h.update(str(tuple(out_slice.shape)).encode())
+        h.update(_tensor_bytes(out_slice))
+    return h.hexdigest()[:16]
+
 def _qkv_hash(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> str:
     h = hashlib.sha1()
     for t in (q, k, v):
@@ -458,7 +470,7 @@ def flash_attn_varlen_with_block_cu_bf16(
     if op_out.data_ptr() != out.data_ptr():
         out.copy_(op_out.to(dtype=out.dtype))
     torch.cuda.synchronize(q.device)
-    output_hash = _tensor_hash(out)
+    output_hash = _effective_out_hash(out, cu_seqlens_q)
     print(f"[turn hash] {turn_hash}", flush=True)
     print(f"[output hash] {output_hash}", flush=True)
     print("======================= turn end =====================", flush=True)
@@ -552,7 +564,7 @@ def flash_attn_varlen_with_block_cu_fp32(
     )
     out.copy_(op_out.to(dtype=out.dtype))
     torch.cuda.synchronize(q.device)
-    output_hash = _tensor_hash(out)
+    output_hash = _effective_out_hash(out, cu_seqlens_q)
     print(f"[turn hash] {turn_hash}", flush=True)
     print(f"[output hash] {output_hash}", flush=True)
     print("======================= turn end =====================", flush=True)

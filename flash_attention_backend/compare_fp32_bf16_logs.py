@@ -10,13 +10,24 @@ TURN_END = "======================= turn end ====================="
 
 TURN_HASH_RE = re.compile(r"\[turn hash\]\s+(?P<hash>[0-9a-f]+)")
 OUTPUT_HASH_RE = re.compile(r"\[output hash\]\s+(?P<hash>[0-9a-f]+)")
+FLOAT_RE = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?"
 VALUE_RE = re.compile(
     r"(?P<key>\(\d+,\s*\d+,\s*\d+\)\s+q=\d+\s+kv_chunk=\d+"
     r"(?:\s+kv_off=\d+\s+kv_seq=\d+)?\s+"
     r"(?:q_elem\[\d+\]\[\d+\]|k_elem\[\d+\]\[\d+\]|QK dot\[\d+\]\[\d+\]|"
     r"score\[\d+\]\[\d+\]|max\[\d+\]\[0\]|sum\[\d+\]\[0\]|softmax\[\d+\]\[\d+\]|"
-    r"sv_matmul\[\d+\]\[\d+\]\[\d+\]|out_tile\[\d+\]\[\d+\])):\s+"
-    r"(?P<value>[-+]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][-+]?\d+)?)"
+    r"sv_matmul\[\d+\]\[\d+\]\[\d+\]|out_tile\[\d+\]\[\d+\]|last_chunk_sum\[\d+\]|"
+    r"param_out\[\d+\]\[\d+\])):\s+"
+    rf"(?P<value>{FLOAT_RE})"
+)
+WRITEBACK_RE = re.compile(
+    r"(?P<key>\(\d+,\s*\d+,\s*\d+\)\s+q=\d+\s+writeback\[\d+\]\[\d+\]):\s+"
+    rf"val=(?P<val>{FLOAT_RE})\s+"
+    rf"merge_sum=(?P<merge_sum>{FLOAT_RE})\s+"
+    rf"div_val=(?P<div_val>{FLOAT_RE})\s+"
+    rf"out_val=(?P<out_val>{FLOAT_RE})"
+    rf"(?:\s+out_val_bf16=(?P<out_val_bf16>{FLOAT_RE}))?"
+    rf"(?:\s+param_out=(?P<param_out>{FLOAT_RE}))?"
 )
 
 
@@ -41,6 +52,19 @@ def load_turns(path):
             m = VALUE_RE.search(line)
             if m:
                 current_values[m.group("key")].append(m.group("value"))
+                continue
+
+            m = WRITEBACK_RE.search(line)
+            if m:
+                key = m.group("key")
+                current_values[f"{key} val"].append(m.group("val"))
+                current_values[f"{key} merge_sum"].append(m.group("merge_sum"))
+                current_values[f"{key} div_val"].append(m.group("div_val"))
+                current_values[f"{key} out_val"].append(m.group("out_val"))
+                if m.group("out_val_bf16") is not None:
+                    current_values[f"{key} out_val_bf16"].append(m.group("out_val_bf16"))
+                if m.group("param_out") is not None:
+                    current_values[f"{key} param_out"].append(m.group("param_out"))
                 continue
 
             if TURN_END in line:
