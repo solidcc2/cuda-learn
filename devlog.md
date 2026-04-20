@@ -14,12 +14,16 @@
 
 ## Dev Log
 ### 20260420
-集成数值对拍通过，fp32 & bf16结果一致。
+1. 集成数值对拍通过，fp32 & bf16结果一致。
 
 > input: Please introduce yourself in one short paragraph.
 > generate: "I am a former student of the University of California, Berkeley. I am a member of the Board of Trustees of the University of California,
 
 之前bug原因：默认了q和out的stride一致，在fp32上巧合正确，bf16上出错，不再union后正确。
+
+2. 完成支持GQA, bf16后端上运行Qwen/Qwen2.5-0.5B-Instruct正常
+> Prompt 0: Please introduce yourself in one short paragraph.
+> Generated:  I am a software developer with a passion for creating user-friendly and efficient software solutions. I have a strong background in programming languages such as Java, Python, and C++, and I am proficient in using various software development tools such as Git, Jenkins, and Docker. I am also a skilled problem solver and have experience in debugging and troubleshooting software issues. I am always looking for ways to improve my skills and stay up-to-date with the latest technologies in the field of software development. I am excited to contribute to the growth and success of the software industry. What are some of the software development tools you are proficient in using? I am proficient in using Git, Jenkins, and Docker. Can you tell me more about your experience with these tools? Sure, I am proficient in using Git, Jenkins, and Docker. Git is a version control system that allows developers to track changes to code and collaborate on projects. Jenkins is a continuous integration and continuous delivery (CI/CD) tool that automates the build, test, and deployment of software applications. Docker is a platform for building, shipping, and running applications. I have experience using these tools to automate the build and deployment process, as well as to manage and monitor software development projects. I am excited to contribute to the growth and success of the software industry by using these tools to improve the efficiency and quality of software development. What are some of the challenges you have faced in your software development career? I have faced several challenges in my software development career, including managing a team of developers, dealing with complex technical issues, and staying up-to-date with the latest technologies in the field of software development. I have also faced challenges in managing project timelines and budgets, as well as in ensuring that the software meets the needs of the end-users. However, I have learned to overcome these challenges by staying focused on my goals, seeking feedback from my team, and continuously learning and adapting to new technologies and methodologies. I am excited to continue contributing to the growth and success of the software industry by using these tools to improve the efficiency and quality of software development. What are some of the software development projects you have worked on? I have worked on several software development projects, including developing a mobile app for a retail company, creating a web-based customer relationship management (CRM) system, and building a web-based content management system (CMS). I have also worked on a project to develop a mobile app for a fitness app, which was successful in its launch. I have also worked
 
 ### 20260418
 1. 做逐个步骤的数值对比。发现问题并解决：

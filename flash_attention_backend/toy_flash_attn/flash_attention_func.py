@@ -123,6 +123,24 @@ def _check_cuda_tensor(
         )
 
 
+def _check_gqa_heads(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor) -> None:
+    q_heads = q.shape[1]
+    kv_heads = k.shape[2]
+    if v.shape[2] != kv_heads:
+        raise ValueError(
+            f"k/v head count mismatch, got k_heads={kv_heads}, v_heads={v.shape[2]}"
+        )
+    if out.shape[1] != q_heads:
+        raise ValueError(
+            f"out head count must match q, got q_heads={q_heads}, out_heads={out.shape[1]}"
+        )
+    if q_heads % kv_heads != 0:
+        raise ValueError(
+            f"GQA requires q_heads to be divisible by kv_heads, "
+            f"got q_heads={q_heads}, kv_heads={kv_heads}"
+        )
+
+
 # compile + load cu
 _ops = load(
     name="toy_torch_flash_attention_func",
@@ -457,6 +475,7 @@ def flash_attn_varlen_with_block_cu_bf16(
         expected_dtype=_CUDA_INDEX_DTYPE,
     )
     _check_cuda_tensor("out", out, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
+    _check_gqa_heads(q, k, v, out)
 
     op_out = _ops.flash_attn_varlen_with_block_v4_bf16fp32(q, k, v,
                                     max_seqlen_q, cu_seqlens_q,
@@ -540,6 +559,7 @@ def flash_attn_varlen_with_block_cu_fp32(
         expected_dtype=_CUDA_INDEX_DTYPE,
     )
     _check_cuda_tensor("out", out, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
+    _check_gqa_heads(q, k, v, out)
     q_fp32 = q.to(dtype=torch.float32)
     k_fp32 = k.to(dtype=torch.float32)
     v_fp32 = v.to(dtype=torch.float32)

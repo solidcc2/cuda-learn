@@ -67,10 +67,10 @@ struct FlashAttnTrait {
     );
 };
 
-// grid(batch_id, q_token_chunk_id, head_id)
+// grid(batch_id, q_token_chunk_id, q_head_id)
 template<typename scalar_t, typename inner_scalar_t>
 struct FlashAttnTrait<scalar_t, inner_scalar_t>::ParamSet {
-    const scalar_t* q;    // total_q x num_heads x head_dim
+    const scalar_t* q;    // total_q x num_q_heads x head_dim
     const scalar_t* k;    // num_blocks x block_size x num_kv_heads x head_dim
     const scalar_t* v;
     scalar_t* out;
@@ -85,7 +85,9 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t>::ParamSet {
     int64_t window_size[2];
     const int32_t* block_table;
     int64_t bt_stride[2];
-    int64_t num_heads;
+    int64_t num_q_heads;
+    int64_t num_kv_heads;
+    int64_t q_per_kv_group;
     int64_t head_dim;
     int64_t block_size;
     bool causal;
@@ -98,8 +100,14 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t>::ParamSet {
     __device__ inline int64_t batch_id() const {
         return blockIdx.x;
     }
-    __device__ inline int64_t head_id() const {
+    __device__ inline int64_t q_head_id() const {
         return blockIdx.z;
+    }
+    __device__ inline int64_t kv_head_id() const {
+        return q_head_id() / q_per_kv_group;
+    }
+    __device__ inline int64_t head_id() const {
+        return q_head_id();
     }
     __device__ inline int64_t q_seqlen() const {
         const int64_t bid = batch_id();
@@ -119,7 +127,7 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t>::ParamSet {
         toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim);
         return q[
             q_stride[0] * (q_token_id + cu_seqlens_q[batch_id()]) + 
-            q_stride[1] * head_id() + 
+            q_stride[1] * q_head_id() +
             q_stride[2] * head_pos
         ];
     }
@@ -128,7 +136,7 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t>::ParamSet {
         toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim);
         return out[
             out_stride[0] * (out_token_id + cu_seqlens_q[batch_id()]) + 
-            out_stride[1] * head_id() + 
+            out_stride[1] * q_head_id() +
             out_stride[2] * head_pos
         ];
     }
@@ -145,7 +153,7 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t>::ParamSet {
         return k[
             k_stride[0] * phy_block_id + 
             k_stride[1] * block_off +
-            k_stride[2] * head_id() + 
+            k_stride[2] * kv_head_id() +
             k_stride[3] * head_pos
         ];
     }
@@ -162,7 +170,7 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t>::ParamSet {
         return v[
             v_stride[0] * phy_block_id + 
             v_stride[1] * block_off +
-            v_stride[2] * head_id() + 
+            v_stride[2] * kv_head_id() +
             v_stride[3] * head_pos
         ];
     }
@@ -931,7 +939,9 @@ void FlashAttnTrait<scalar_t, inner_scalar_t>::check_inputs(
     torch::Tensor block_table,
     torch::Tensor out) {
     TORCH_CHECK(q.sizes() == out.sizes(), "q and out must have the same shape");
-    TORCH_CHECK(q.size(1) == k.size(2), "GQA not support, num_head must equal num_kv_head");
+    TORCH_CHECK(k.size(2) == v.size(2), "k and v must have the same num_kv_heads");
+    TORCH_CHECK(q.size(1) % k.size(2) == 0,
+        "GQA requires num_q_heads to be divisible by num_kv_heads");
 } 
 
 template<typename scalar_t, typename inner_scalar_t>
@@ -961,7 +971,9 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t>::flash_attn_varlen_with_b
 #endif
     int head_dim = q.size(2);
     auto batch_size = seqused_k.size(0);
-    auto num_heads = q.size(1);
+    auto num_q_heads = q.size(1);
+    auto num_kv_heads = k.size(2);
+    auto q_per_kv_group = num_q_heads / num_kv_heads;
     int64_t block_size = k.size(1);
 
     assert(head_dim <= 128);        // 泛化
@@ -971,7 +983,7 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t>::flash_attn_varlen_with_b
     int blockX = (head_dim + K_X_STRIDE - 1) / K_X_STRIDE;
     int blockY = BLOCK_Y;
     dim3 block(blockX, blockY);
-    dim3 grid(batch_size, (max_seqlen_q + q_chunk_size - 1)/q_chunk_size, num_heads);
+    dim3 grid(batch_size, (max_seqlen_q + q_chunk_size - 1)/q_chunk_size, num_q_heads);
 
     ParamSet param = {
         .q = q.const_data_ptr<scalar_t>(),
@@ -989,7 +1001,9 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t>::flash_attn_varlen_with_b
         .window_size = {window_size_left, window_size_right},
         .block_table = block_table.const_data_ptr<int32_t>(),
         .bt_stride = {block_table.stride(0), block_table.stride(1)},
-        .num_heads = num_heads,
+        .num_q_heads = num_q_heads,
+        .num_kv_heads = num_kv_heads,
+        .q_per_kv_group = q_per_kv_group,
         .head_dim = head_dim,
         .block_size = block_size,
         .causal = causal,

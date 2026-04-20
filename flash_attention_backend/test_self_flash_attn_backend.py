@@ -26,6 +26,13 @@ MODEL_CONFIGS = {
 }
 
 
+def _attention_config() -> tuple[str, str, str]:
+    impl = os.environ.get("TOY_FLASH_ATTN_USE", "bf16")
+    if impl == "official":
+        return impl, "FLASH_ATTN", "auto"
+    return impl, "CUSTOM", "bfloat16"
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument(
@@ -43,6 +50,7 @@ def main() -> None:
     args = _parse_args()
     model_config = MODEL_CONFIGS[args.model]
     model_revision = model_config["revision"]
+    attention_impl, attention_backend, kv_cache_dtype = _attention_config()
 
     llm = LLM(
         model=model_config["model"],
@@ -51,16 +59,17 @@ def main() -> None:
         max_model_len=512,
         gpu_memory_utilization=0.8,
         max_num_seqs=1,
-        # attention_backend="FLASH_ATTN",
-        attention_backend="CUSTOM",
-        kv_cache_dtype="bfloat16"
-        # kv_cache_dtype="auto"
+        attention_backend=attention_backend,
+        kv_cache_dtype=kv_cache_dtype,
     )
     engine = llm.llm_engine
     vconfig = engine.vllm_config
 
     print("model                  =", model_config["model"])
     print("revision               =", model_revision)
+    print("TOY_FLASH_ATTN_USE     =", attention_impl)
+    print("attention_backend      =", attention_backend)
+    print("kv_cache_dtype arg     =", kv_cache_dtype)
     print("cache_config.cache_dtype =", vconfig.cache_config.cache_dtype)
     print("model_config.dtype      =", vconfig.model_config.dtype)
     print("resolved kv torch dtype =", get_kv_cache_torch_dtype(
@@ -75,7 +84,7 @@ def main() -> None:
     sampling_params = SamplingParams(
         temperature=0.0,
         top_p=0.9,
-        max_tokens=32,
+        max_tokens=2048,
     )
 
     if args.interactive:

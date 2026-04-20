@@ -2,8 +2,8 @@
 #include <ATen/cuda/CUDAContext.h>
 
 
-# define TOY_FLASH_ATTN_ASSERT_ON
-# define DEBUG_NUMERIC
+// # define TOY_FLASH_ATTN_ASSERT_ON
+// # define DEBUG_NUMERIC
 // # define DEBUG_FLASH_ATTN_V3_TRACE
 
 #ifdef TOY_FLASH_ATTN_ASSERT_ON
