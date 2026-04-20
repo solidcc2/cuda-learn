@@ -229,6 +229,23 @@ def flash_attn_varlen_with_block(
         offset = [seq_id%block_size for seq_id in range(*kv_range)]
         K = k[phy_block_ids, offset]
         V = v[phy_block_ids, offset]
+        q_heads = Q.shape[1]
+        kv_heads = K.shape[1]
+        if q_heads % kv_heads != 0:
+            raise ValueError(
+                f"GQA requires q_heads to be divisible by kv_heads, "
+                f"got q_heads={q_heads}, kv_heads={kv_heads}"
+            )
+        if V.shape[1] != kv_heads:
+            raise ValueError(
+                f"k/v head count mismatch, got k_heads={kv_heads}, "
+                f"v_heads={V.shape[1]}"
+            )
+        if q_heads != kv_heads:
+            group_size = q_heads // kv_heads
+            kv_head_ids = torch.arange(q_heads, device=q.device) // group_size
+            K = K[:, kv_head_ids, :]
+            V = V[:, kv_head_ids, :]
         head_dim = q.shape[2]
         S = Q.transpose(0, 1).matmul(K.permute(1, 2, 0)) / float(head_dim ** 0.5)
 
