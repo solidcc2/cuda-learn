@@ -733,6 +733,17 @@ class FlashAttentionFuncCuKernelHeadDim64RegressionTest(unittest.TestCase):
     def setUp(self) -> None:
         _require_cuda()
 
+    def test_with_block_cu_head_dim_64_minimal_no_mask_no_padding_seed_423(self) -> None:
+        _assert_close_with_block_cu(
+            q_lens=[4, 4],
+            k_lens=None,
+            causal=False,
+            window_size=None,
+            head_dim=64,
+            dtype=torch.bfloat16,
+            seed=423,
+        )
+
     def test_with_block_cu_head_dim_64_minimal_no_mask_no_padding_regression(self) -> None:
         for iteration in range(1000):
             with self.subTest(iteration=iteration):

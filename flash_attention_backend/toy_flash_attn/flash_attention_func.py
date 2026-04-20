@@ -170,7 +170,7 @@ def flash_attn_varlen_func(
         q和kv尾对齐
     '''
     if block_table is not None:
-        if os.getenv("TOY_FLASH_ATTN_USE_WITH_BLOCK", "0") == "1":
+        if os.getenv("TOY_FLASH_ATTN_USE", "bf16") == "reference":
             return flash_attn_varlen_with_block(
                 q, k, v,
                 max_seqlen_q, cu_seqlens_q,
@@ -178,7 +178,15 @@ def flash_attn_varlen_func(
                 causal, window_size, block_table, out,
                 layer=layer,
             )
-        return flash_attn_varlen_with_block_cu(
+        if os.getenv("TOY_FLASH_ATTN_USE", "bf16") == "fp32":
+            return flash_attn_varlen_with_block_cu_fp32(
+                q, k, v,
+                max_seqlen_q, cu_seqlens_q,
+                max_seqlen_k, seqused_k,
+                causal, window_size, block_table, out,
+                layer=layer,
+            )
+        return flash_attn_varlen_with_block_cu_bf16(
             q, k, v,
             max_seqlen_q, cu_seqlens_q,
             max_seqlen_k, seqused_k,
@@ -316,8 +324,66 @@ def flash_attn_varlen_without_block(
         out[token_range[0]:token_range[1]] = o
     return out
 
+import hashlib
+import torch
 
-def flash_attn_varlen_with_block_cu(
+def _tensor_bytes(t: torch.Tensor) -> bytes:
+    x = t.detach().contiguous().cpu().view(torch.uint8)
+    return x.numpy().tobytes()
+
+def _tensor_hash(t: torch.Tensor) -> str:
+    return hashlib.sha1(_tensor_bytes(t)).hexdigest()[:16]
+
+def _effective_out_hash(out: torch.Tensor, cu_seqlens_q: torch.Tensor) -> str:
+    h = hashlib.sha1()
+    cu = cu_seqlens_q.detach().cpu()
+    for batch_id in range(cu.numel() - 1):
+        begin = cu[batch_id].item()
+        end = cu[batch_id + 1].item()
+        out_slice = out[begin:end]
+        h.update(str(out_slice.dtype).encode())
+        h.update(str(tuple(out_slice.shape)).encode())
+        h.update(_tensor_bytes(out_slice))
+    return h.hexdigest()[:16]
+
+def _qkv_hash(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor) -> str:
+    h = hashlib.sha1()
+    for t in (q, k, v):
+        x = t.detach().contiguous().cpu()
+        h.update(str(x.dtype).encode())
+        h.update(str(tuple(x.shape)).encode())
+        h.update(_tensor_bytes(x))
+    return h.hexdigest()[:16]
+
+def _effective_qkv_hash(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    seqused_k: torch.Tensor,
+    block_table: torch.Tensor,
+) -> str:
+    h = hashlib.sha1()
+    block_size = k.shape[1]
+
+    batch_size = len(seqused_k)
+    for batch_id in range(batch_size):
+        q_begin = cu_seqlens_q[batch_id].item()
+        q_end = cu_seqlens_q[batch_id + 1].item()
+        kv_len = seqused_k[batch_id].item()
+
+        q_slice = q[q_begin:q_end]
+        h.update(_qkv_hash(q_slice, q_slice.new_empty((0,)), q_slice.new_empty((0,))).encode())
+
+        phy_block_ids = [block_table[batch_id][seq_id // block_size] for seq_id in range(kv_len)]
+        offsets = [seq_id % block_size for seq_id in range(kv_len)]
+        k_slice = k[phy_block_ids, offsets]
+        v_slice = v[phy_block_ids, offsets]
+        h.update(_qkv_hash(k_slice, v_slice, k_slice.new_empty((0,))).encode())
+
+    return h.hexdigest()[:16]
+
+def flash_attn_varlen_with_block_cu_bf16(
     q: torch.Tensor,    # total_q x num_head x head_dim
     k: torch.Tensor,    # NHD： num_blocks x block_size x num_head x head_dim
     v: torch.Tensor,
@@ -374,16 +440,12 @@ def flash_attn_varlen_with_block_cu(
         expected_dtype=_CUDA_INDEX_DTYPE,
     )
     _check_cuda_tensor("out", out, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
-    # q = q.to(dtype=torch.float32)
-    # k = k.to(dtype=torch.float32)
-    # v = v.to(dtype=torch.float32)
-    # out = out.to(dtype=torch.float32)
 
-    out = _ops.flash_attn_varlen_with_block_v3(q, k, v, 
+    op_out = _ops.flash_attn_varlen_with_block_v4_bf16fp32(q, k, v,
                                     max_seqlen_q, cu_seqlens_q,
                                     max_seqlen_k, seqused_k,
                                     causal, window_size[0], window_size[1],
-                                    block_table, 
+                                    block_table,
                                     out)
     _maybe_dump_flash_attn_context(
         "with_block_cu",
@@ -398,6 +460,94 @@ def flash_attn_varlen_with_block_cu(
         window_size=window_size,
         block_table=block_table,
         debug_meta=_layer_debug_meta(layer),
-        result=out,
+        result=op_out,
     )
-    return out.to(dtype=_CUDA_VALUE_DTYPE)
+    if op_out.data_ptr() != out.data_ptr():
+        out.copy_(op_out.to(dtype=out.dtype))
+    return out
+
+def flash_attn_varlen_with_block_cu_fp32(
+    q: torch.Tensor,    # total_q x num_head x head_dim
+    k: torch.Tensor,    # NHD： num_blocks x block_size x num_head x head_dim
+    v: torch.Tensor,
+    max_seqlen_q: int,
+    cu_seqlens_q: torch.Tensor,
+    max_seqlen_k: int,
+    seqused_k: torch.Tensor,
+    # softmax_scale: int|None=None,
+    causal=False,
+    window_size: tuple[int, int] | None = None,
+    block_table=None,
+    # return_softmax_lse=False,
+    out: torch.Tensor|None = None,
+    layer=None,
+) -> torch.Tensor:
+    if out is None:
+        out = torch.empty_like(q)
+    if window_size is None:
+        window_size = (-1, -1)
+    if block_table is None:
+        raise ValueError("block_table must not be None for flash_attn_varlen_with_block_cu")
+    if not q.is_cuda:
+        raise ValueError("flash_attn_varlen_with_block_cu expects CUDA tensors")
+
+    _maybe_log_cuda_inputs(
+        q=q,
+        k=k,
+        v=v,
+        cu_seqlens_q=cu_seqlens_q,
+        seqused_k=seqused_k,
+        block_table=block_table,
+        out=out,
+    )
+    expected_device = q.device
+    _check_cuda_tensor("q", q, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
+    _check_cuda_tensor("k", k, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
+    _check_cuda_tensor("v", v, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
+    _check_cuda_tensor(
+        "cu_seqlens_q",
+        cu_seqlens_q,
+        expected_device=expected_device,
+        expected_dtype=_CUDA_INDEX_DTYPE,
+    )
+    _check_cuda_tensor(
+        "seqused_k",
+        seqused_k,
+        expected_device=expected_device,
+        expected_dtype=_CUDA_INDEX_DTYPE,
+    )
+    _check_cuda_tensor(
+        "block_table",
+        block_table,
+        expected_device=expected_device,
+        expected_dtype=_CUDA_INDEX_DTYPE,
+    )
+    _check_cuda_tensor("out", out, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
+    q_fp32 = q.to(dtype=torch.float32)
+    k_fp32 = k.to(dtype=torch.float32)
+    v_fp32 = v.to(dtype=torch.float32)
+    out_fp32 = torch.empty_like(q_fp32)
+
+    op_out = _ops.flash_attn_varlen_with_block_v4_fp32fp32(q_fp32, k_fp32, v_fp32,
+                                    max_seqlen_q, cu_seqlens_q,
+                                    max_seqlen_k, seqused_k,
+                                    causal, window_size[0], window_size[1],
+                                    block_table,
+                                    out_fp32)
+    _maybe_dump_flash_attn_context(
+        "with_block_cu",
+        q=q_fp32,
+        k=k_fp32,
+        v=v_fp32,
+        max_seqlen_q=max_seqlen_q,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_k=max_seqlen_k,
+        seqused_k=seqused_k,
+        causal=causal,
+        window_size=window_size,
+        block_table=block_table,
+        debug_meta=_layer_debug_meta(layer),
+        result=op_out,
+    )
+    out.copy_(op_out.to(dtype=out.dtype))
+    return out

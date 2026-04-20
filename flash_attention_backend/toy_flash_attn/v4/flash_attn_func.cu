@@ -5,10 +5,12 @@
 #include <cassert>
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <cuda_bf16.h>
 #include <string>
 #include <limits>
 
 #include "helper.h"
+#include "torch/headeronly/util/BFloat16.h"
 
 template<typename scalar_t, typename inner_scalar_t>
 struct FlashAttnTrait;
@@ -22,7 +24,16 @@ __global__ void kernel_wrapper(
 // grid(batch_id, q_token_chunk_id, head_id)
 template<typename scalar_t, typename inner_scalar_t>
 struct FlashAttnTrait {
-    static const int32_t K_X_STRIDE=16;  // x 维度每线程处理16个数
+    // static const int32_t K_X_STRIDE=16;  // x 维度每线程处理16个数
+    // static const int32_t Q_CHUNK_SIZE = 8;
+    // static const int32_t KV_CHUNK_SIZE = 64;
+    // static const int32_t BLOCK_Y = 64;
+
+    static const int32_t K_X_STRIDE=4;  // x 维度每线程处理16个数
+    static const int32_t Q_CHUNK_SIZE = 8;
+    static const int32_t KV_CHUNK_SIZE = 8;
+    static const int32_t BLOCK_Y = 8;
+
     struct ParamSet;
     struct TileLayout;
     static __device__ void kernel(ParamSet& param);
@@ -62,13 +73,11 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t>::ParamSet {
     const scalar_t* q;    // total_q x num_heads x head_dim
     const scalar_t* k;    // num_blocks x block_size x num_kv_heads x head_dim
     const scalar_t* v;
-    scalar_t* out;   // assert out_layout == q_layout
-    union {
-        int64_t q_stride[3];  
-        int64_t out_stride[3];  
-    };
+    scalar_t* out;
+    int64_t q_stride[3];  
     int64_t k_stride[4];
     int64_t v_stride[4];
+    int64_t out_stride[3];  
     int64_t max_seqlen_q;
     const int32_t* cu_seqlens_q;  // batch_size + 1
     int64_t max_seqlen_k;
@@ -391,6 +400,20 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
     };
 
     const int64_t q_kv_offset = param.q_seqlen() - param.kv_seqlen();
+    const int64_t q_chunk_first = blockIdx.y * param.q_chunk_size;
+    const int64_t q_chunk_last = min(q_chunk_first + param.q_chunk_size, param.q_seqlen()) - 1;
+    int64_t kv_seq_begin = 0;
+    int64_t kv_seq_end = 0;
+    if (q_chunk_first <= q_chunk_last) {
+        kv_seq_begin = max(int64_t(0), q_chunk_first - q_kv_offset - kv_win[0]);
+        kv_seq_end = min(param.kv_seqlen(), q_chunk_last - q_kv_offset + 1 + kv_win[1]);
+        if (!param.causal && param.window_size[0] == -1 && param.window_size[1] == -1) {
+            kv_seq_begin = 0;
+            kv_seq_end = param.kv_seqlen();
+        }
+    }
+    const int64_t kv_chunk_begin = kv_seq_begin / param.kv_chunk_size;
+    const int64_t kv_chunk_end = (kv_seq_end + param.kv_chunk_size - 1) / param.kv_chunk_size;
     {   // load q chunk 
         bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < head_dim_thread_count;
         if (valid_thread) {
@@ -408,9 +431,8 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
         __syncthreads();
     }
 
-    // TODO: kv_chunk的有效边界是远大于win size的，这里可以剪枝
-    for(int64_t kv_chunk_id = 0; 
-            kv_chunk_id < (param.kv_seqlen() + param.kv_chunk_size - 1) / param.kv_chunk_size; kv_chunk_id++) {
+    for(int64_t kv_chunk_id = kv_chunk_end - 1;
+            kv_chunk_id >= kv_chunk_begin; kv_chunk_id--) {
         {   // kv_seq_id 作用域 for k tile load
             int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + threadIdx.y;
             bool valid_thread = threadIdx.y < param.kv_chunk_size && threadIdx.x < head_dim_thread_count;
@@ -429,7 +451,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
         }
 
         // Q K matmul
-        for(int kv_chunk_off = 0; kv_chunk_off <param.kv_chunk_size; kv_chunk_off ++) {
+        for(int64_t kv_chunk_off = param.kv_chunk_size - 1; kv_chunk_off >= 0; kv_chunk_off--) {
             int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + kv_chunk_off;
             {   // QK 对位乘
                 bool valid_thread = threadIdx.y < param.q_chunk_size && threadIdx.x < head_dim_thread_count;
@@ -683,8 +705,14 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
                 for(int64_t lane=0; lane < K_X_STRIDE; lane++) {
                     int64_t seq_off = base + lane;
                     if (seq_off < param.kv_chunk_size) {
+                        int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + seq_off;
+                        bool valid_q_kv_pair =
+                            param.q_token_id() < param.q_seqlen() &&
+                            layout.is_valid_kv(param.q_token_id(), kv_seq_id, q_kv_offset, kv_win);
                         inner_scalar_t score = layout.score_reduction_at(threadIdx.y, seq_off);
-                        inner_scalar_t softmax = exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(score, max_), "softmax_exp_sub"));    // 去除sum除法
+                        inner_scalar_t softmax = valid_q_kv_pair
+                            ? exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(score, max_), "softmax_exp_sub"))
+                            : inner_scalar_t(0);
                         layout.softmax_reduction_at(threadIdx.y, seq_off) = softmax;
                     }
                 }
@@ -717,9 +745,16 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
                 for(int64_t lane=0; lane < K_X_STRIDE; lane++) {
                     int64_t seq_off = base + lane;
                     if (seq_off < param.kv_chunk_size) {
+                        int64_t kv_seq_id = kv_chunk_id * param.kv_chunk_size + seq_off;
+                        bool valid_q_kv_pair =
+                            param.q_token_id() < param.q_seqlen() &&
+                            layout.is_valid_kv(param.q_token_id(), kv_seq_id, q_kv_offset, kv_win);
                         scalar_t s = static_cast<scalar_t>(layout.softmax_reduction_at(threadIdx.y, seq_off));
+                        // inner_scalar_t s = layout.softmax_reduction_at(threadIdx.y, seq_off);
                         inner_scalar_t v = layout.v_t_at(head_off, seq_off);
-                        inner_scalar_t val = check_non_finite_val(s * v, "softmax_mul_v");
+                        inner_scalar_t val = valid_q_kv_pair
+                            ? check_non_finite_val(s * v, "softmax_mul_v")
+                            : inner_scalar_t(0);
                         layout.sv_matmul_reduction_at(threadIdx.y, seq_off) = inner_scalar_t(val);
                     }
                 }
@@ -861,6 +896,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
                 layout.last_chunk_max_at(threadIdx.y) = merge_m;
                 layout.last_chunk_sum_at(threadIdx.y) = merge_sum;
             }
+            __syncthreads();
         }
         __syncthreads();
     } 
@@ -894,7 +930,6 @@ void FlashAttnTrait<scalar_t, inner_scalar_t>::check_inputs(
     int64_t window_size_right,
     torch::Tensor block_table,
     torch::Tensor out) {
-
     TORCH_CHECK(q.sizes() == out.sizes(), "q and out must have the same shape");
     TORCH_CHECK(q.size(1) == k.size(2), "GQA not support, num_head must equal num_kv_head");
 } 
@@ -931,10 +966,10 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t>::flash_attn_varlen_with_b
 
     assert(head_dim <= 128);        // 泛化
 
-    int q_chunk_size = 8;
-    int kv_chunk_size = 64;
+    int q_chunk_size = Q_CHUNK_SIZE;
+    int kv_chunk_size = KV_CHUNK_SIZE;
     int blockX = (head_dim + K_X_STRIDE - 1) / K_X_STRIDE;
-    int blockY = 64; // 固定为64
+    int blockY = BLOCK_Y;
     dim3 block(blockX, blockY);
     dim3 grid(batch_size, (max_seqlen_q + q_chunk_size - 1)/q_chunk_size, num_heads);
 
@@ -946,6 +981,7 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t>::flash_attn_varlen_with_b
         .q_stride = {q.stride(0), q.stride(1), q.stride(2)},
         .k_stride = {k.stride(0), k.stride(1), k.stride(2), k.stride(3)},
         .v_stride = {v.stride(0), v.stride(1), v.stride(2), v.stride(3)},
+        .out_stride = {out.stride(0), out.stride(1), out.stride(2)},
         .max_seqlen_q = max_seqlen_q,
         .cu_seqlens_q = cu_seqlens_q.const_data_ptr<int32_t>(),
         .max_seqlen_k = max_seqlen_k,
@@ -967,7 +1003,8 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t>::flash_attn_varlen_with_b
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("flash_attn_varlen_with_block_v3", &FlashAttnTrait<at::BFloat16, float>::flash_attn_varlen_with_block, "flash attn varlen with block");
+    m.def("flash_attn_varlen_with_block_v4_bf16fp32", &FlashAttnTrait<at::BFloat16, float>::flash_attn_varlen_with_block, "flash attn varlen with block");
+    m.def("flash_attn_varlen_with_block_v4_fp32fp32", &FlashAttnTrait<float, float>::flash_attn_varlen_with_block, "flash attn varlen with block");
     // m.def("flash_attn_varlen_with_block_v3", &FlashAttnTrait<float, float>::flash_attn_varlen_with_block, "flash attn varlen with block");
     // m.def("flash_attn_varlen_with_block_v3", &FlashAttnTrait<at::BFloat16, at::BFloat16>::flash_attn_varlen_with_block, "flash attn varlen with block");
 }

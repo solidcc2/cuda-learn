@@ -67,3 +67,15 @@ template<typename scalar_t>
 __device__ inline scalar_t softmax_div(scalar_t a, scalar_t b) {
     return (b != scalar_t(0)) ? a/b : scalar_t{0};
 }
+
+template<typename scalar_t>
+__device__ inline scalar_t valid_mul(scalar_t valid_a, scalar_t b) {
+    return valid_a == scalar_t(0) ? scalar_t(0) : valid_a * b;
+}
+
+__device__ inline void busy_wait(unsigned long long delay_cycles) {
+    unsigned long long start = clock64();
+    while (clock64() - start < delay_cycles) {
+    }
+}
+

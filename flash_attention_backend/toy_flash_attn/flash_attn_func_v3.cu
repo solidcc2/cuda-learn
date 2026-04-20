@@ -89,12 +89,10 @@ struct FlashAttnTrait {
         const scalar_t* k;    // num_blocks x block_size x num_kv_heads x head_dim
         const scalar_t* v;
         scalar_t* out;   // assert out_layout == q_layout
-        union {
-            int64_t q_stride[3];  
-            int64_t out_stride[3];  
-        };
+        int64_t q_stride[3];  
         int64_t k_stride[4];
         int64_t v_stride[4];
+        int64_t out_stride[3];  
         int64_t max_seqlen_q;
         const int32_t* cu_seqlens_q;  // batch_size + 1
         int64_t max_seqlen_k;
@@ -798,6 +796,7 @@ struct FlashAttnTrait {
             .q_stride = {q.stride(0), q.stride(1), q.stride(2)},
             .k_stride = {k.stride(0), k.stride(1), k.stride(2), k.stride(3)},
             .v_stride = {v.stride(0), v.stride(1), v.stride(2), v.stride(3)},
+            .out_stride = {out.stride(0), out.stride(1), out.stride(2)},
             .max_seqlen_q = max_seqlen_q,
             .cu_seqlens_q = cu_seqlens_q.const_data_ptr<int32_t>(),
             .max_seqlen_k = max_seqlen_k,
