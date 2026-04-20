@@ -749,8 +749,8 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
                         bool valid_q_kv_pair =
                             param.q_token_id() < param.q_seqlen() &&
                             layout.is_valid_kv(param.q_token_id(), kv_seq_id, q_kv_offset, kv_win);
-                        // scalar_t s = static_cast<scalar_t>(layout.softmax_reduction_at(threadIdx.y, seq_off));
-                        inner_scalar_t s = layout.softmax_reduction_at(threadIdx.y, seq_off);
+                        scalar_t s = static_cast<scalar_t>(layout.softmax_reduction_at(threadIdx.y, seq_off));
+                        // inner_scalar_t s = layout.softmax_reduction_at(threadIdx.y, seq_off);
                         inner_scalar_t v = layout.v_t_at(head_off, seq_off);
                         inner_scalar_t val = valid_q_kv_pair
                             ? check_non_finite_val(s * v, "softmax_mul_v")
