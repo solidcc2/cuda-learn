@@ -440,11 +440,6 @@ def flash_attn_varlen_with_block_cu_bf16(
         expected_dtype=_CUDA_INDEX_DTYPE,
     )
     _check_cuda_tensor("out", out, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
-    # q = q.to(dtype=torch.float32)
-    # k = k.to(dtype=torch.float32)
-    # v = v.to(dtype=torch.float32)
-    # out = out.to(dtype=torch.float32)
-    turn_hash = _effective_qkv_hash(q, k, v, cu_seqlens_q, seqused_k, block_table)
 
     op_out = _ops.flash_attn_varlen_with_block_v4_bf16fp32(q, k, v,
                                     max_seqlen_q, cu_seqlens_q,
@@ -469,13 +464,6 @@ def flash_attn_varlen_with_block_cu_bf16(
     )
     if op_out.data_ptr() != out.data_ptr():
         out.copy_(op_out.to(dtype=out.dtype))
-    torch.cuda.synchronize(q.device)
-    output_hash = _effective_out_hash(out, cu_seqlens_q)
-    print(f"[turn hash] {turn_hash}", flush=True)
-    print(f"[output hash] {output_hash}", flush=True)
-    print("======================= turn end =====================", flush=True)
-    # os._exit(0)
-
     return out
 
 def flash_attn_varlen_with_block_cu_fp32(
@@ -535,7 +523,6 @@ def flash_attn_varlen_with_block_cu_fp32(
         expected_dtype=_CUDA_INDEX_DTYPE,
     )
     _check_cuda_tensor("out", out, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
-    turn_hash = _effective_qkv_hash(q, k, v, cu_seqlens_q, seqused_k, block_table)
     q_fp32 = q.to(dtype=torch.float32)
     k_fp32 = k.to(dtype=torch.float32)
     v_fp32 = v.to(dtype=torch.float32)
@@ -563,10 +550,4 @@ def flash_attn_varlen_with_block_cu_fp32(
         result=op_out,
     )
     out.copy_(op_out.to(dtype=out.dtype))
-    torch.cuda.synchronize(q.device)
-    output_hash = _effective_out_hash(out, cu_seqlens_q)
-    print(f"[turn hash] {turn_hash}", flush=True)
-    print(f"[output hash] {output_hash}", flush=True)
-    print("======================= turn end =====================", flush=True)
-    # os._exit(0)
     return out
