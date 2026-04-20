@@ -24,15 +24,15 @@ __global__ void kernel_wrapper(
 // grid(batch_id, q_token_chunk_id, head_id)
 template<typename scalar_t, typename inner_scalar_t>
 struct FlashAttnTrait {
-    // static const int32_t K_X_STRIDE=16;  // x 维度每线程处理16个数
-    // static const int32_t Q_CHUNK_SIZE = 8;
-    // static const int32_t KV_CHUNK_SIZE = 64;
-    // static const int32_t BLOCK_Y = 64;
+    static const int32_t K_X_STRIDE=16;  // x 维度每线程处理16个数
+    static const int32_t Q_CHUNK_SIZE = 8;  // 不能太大，中间tile太多，会爆shared memory, 下一版本改为wmma去除中间tile
+    static const int32_t KV_CHUNK_SIZE = 64;
+    static const int32_t BLOCK_Y = 64;
 
-    static const int32_t K_X_STRIDE=4;  // x 维度每线程处理16个数
-    static const int32_t Q_CHUNK_SIZE = 8;
-    static const int32_t KV_CHUNK_SIZE = 8;
-    static const int32_t BLOCK_Y = 8;
+    // static const int32_t K_X_STRIDE=4; 
+    // static const int32_t Q_CHUNK_SIZE = 8;
+    // static const int32_t KV_CHUNK_SIZE = 8;
+    // static const int32_t BLOCK_Y = 8;
 
     struct ParamSet;
     struct TileLayout;

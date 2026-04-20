@@ -28,9 +28,23 @@ MODEL_CONFIGS = {
 
 def _attention_config() -> tuple[str, str, str]:
     impl = os.environ.get("TOY_FLASH_ATTN_USE", "bf16")
-    if impl == "official":
+    if impl in {"offical", "official"}:
         return impl, "FLASH_ATTN", "auto"
     return impl, "CUSTOM", "bfloat16"
+
+
+def _make_prompts(batch_size: int) -> list[str]:
+    base_prompts = [
+        "Please introduce yourself in one short paragraph.",
+        "Explain what GPU attention does in one sentence.",
+        "Write a short greeting to a new teammate.",
+        "List three benefits of batching requests.",
+        "Describe CUDA in simple terms.",
+        "Give one tip for debugging numerical kernels.",
+        "Summarize what a KV cache is.",
+        "Explain why GQA reduces KV cache size.",
+    ]
+    return [base_prompts[i % len(base_prompts)] for i in range(batch_size)]
 
 
 def _parse_args() -> argparse.Namespace:
@@ -42,8 +56,27 @@ def _parse_args() -> argparse.Namespace:
         default="qwen",
         help="Model to run. Defaults to qwen.",
     )
+    parser.add_argument(
+        "-b",
+        "--batch-size",
+        type=int,
+        default=1,
+        help="Number of prompts to generate in non-interactive mode.",
+    )
+    parser.add_argument(
+        "-t",
+        "--max-tokens",
+        type=int,
+        default=2048,
+        help="Maximum generated tokens per prompt.",
+    )
     parser.add_argument("-i", action="store_true", dest="interactive")
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.batch_size <= 0:
+        parser.error("--batch-size must be positive")
+    if args.max_tokens <= 0:
+        parser.error("--max-tokens must be positive")
+    return args
 
 
 def main() -> None:
@@ -58,7 +91,7 @@ def main() -> None:
         tokenizer_revision=model_revision,
         max_model_len=512,
         gpu_memory_utilization=0.8,
-        max_num_seqs=1,
+        max_num_seqs=args.batch_size,
         attention_backend=attention_backend,
         kv_cache_dtype=kv_cache_dtype,
     )
@@ -70,6 +103,8 @@ def main() -> None:
     print("TOY_FLASH_ATTN_USE     =", attention_impl)
     print("attention_backend      =", attention_backend)
     print("kv_cache_dtype arg     =", kv_cache_dtype)
+    print("batch_size             =", args.batch_size)
+    print("max_tokens             =", args.max_tokens)
     print("cache_config.cache_dtype =", vconfig.cache_config.cache_dtype)
     print("model_config.dtype      =", vconfig.model_config.dtype)
     print("resolved kv torch dtype =", get_kv_cache_torch_dtype(
@@ -77,14 +112,12 @@ def main() -> None:
         vconfig.model_config.dtype,
     ))
 
-    prompts = [
-        "Please introduce yourself in one short paragraph.",
-    ]
+    prompts = _make_prompts(args.batch_size)
 
     sampling_params = SamplingParams(
         temperature=0.0,
         top_p=0.9,
-        max_tokens=2048,
+        max_tokens=args.max_tokens,
     )
 
     if args.interactive:
