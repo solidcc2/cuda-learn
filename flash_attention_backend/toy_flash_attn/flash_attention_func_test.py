@@ -18,7 +18,7 @@ _MOD = module_from_spec(_SPEC)
 _SPEC.loader.exec_module(_MOD)
 flash_attn_varlen_without_block = _MOD.flash_attn_varlen_without_block
 flash_attn_varlen_with_block = _MOD.flash_attn_varlen_with_block
-flash_attn_varlen_with_block_cu = _MOD.flash_attn_varlen_with_block_cu
+flash_attn_varlen_with_block_cu = _MOD.flash_attn_varlen_with_block_cu_fp32
 
 _VLLM_MATCH_TOP10_WORST_DUMPS = [
     "00263_with_block.pt",
@@ -34,6 +34,15 @@ _VLLM_MATCH_TOP10_WORST_DUMPS = [
 ]
 
 _STEP0_REPLAY_DUMP = "00000_with_block.pt"
+
+
+def _test_verbose() -> bool:
+    return os.environ.get("TOY_FLASH_ATTN_TEST_VERBOSE", "0") == "1"
+
+
+def _test_print(*args, **kwargs) -> None:
+    if _test_verbose():
+        print(*args, **kwargs)
 
 
 def _debug_compare_reference_window(
@@ -75,15 +84,15 @@ def _debug_compare_reference_window(
     probs = window_scores.softmax(0)
     out = probs.unsqueeze(0).matmul(v_dense[left:right]).squeeze(0)
 
-    print(
+    _test_print(
         f"[DEBUG REF] batch={batch_id} head={head_id} q={q_token_id} "
         f"range=[{left},{right})"
     )
-    print("[DEBUG REF] q[:4]:", q_row[:4])
-    print("[DEBUG REF] k[:4,:4]:", k_dense[left:right][:4, :4])
-    print("[DEBUG REF] scores[:4]:", window_scores[:4])
-    print("[DEBUG REF] probs[:4]:", probs[:4])
-    print("[DEBUG REF] out[:4]:", out[:4])
+    _test_print("[DEBUG REF] q[:4]:", q_row[:4])
+    _test_print("[DEBUG REF] k[:4,:4]:", k_dense[left:right][:4, :4])
+    _test_print("[DEBUG REF] scores[:4]:", window_scores[:4])
+    _test_print("[DEBUG REF] probs[:4]:", probs[:4])
+    _test_print("[DEBUG REF] out[:4]:", out[:4])
 
 
 def _require_fa2_cuda() -> None:
@@ -362,12 +371,15 @@ def _run_toy_with_block_cu(
 
 
 def _require_with_block_cu_launch_constraints(head_dim: int) -> None:
-    # The current CUDA block kernel relies on warp-level reductions and
-    # requires blockDim.x >= warpSize. The launcher maps blockDim.x=head_dim.
-    if head_dim < 32:
+    # v4 maps blockDim.x = ceil(head_dim / K_X_STRIDE) with K_X_STRIDE=4.
+    # The kernel asserts blockDim.x is a power of two and that
+    # q_chunk_size(8) * blockDim.x is warp-aligned.
+    block_dim_x = (head_dim + 3) // 4
+    if block_dim_x & (block_dim_x - 1) != 0 or (8 * block_dim_x) % 32 != 0:
         raise unittest.SkipTest(
-            "with_block_cu currently requires head_dim >= 32 "
-            "(launcher uses blockDim.x = head_dim)."
+            "with_block_cu launch constraints require "
+            "ceil(head_dim / 4) to be a power of two and "
+            "8 * ceil(head_dim / 4) to be warp-aligned."
         )
 
 
@@ -388,7 +400,7 @@ def _run_case_with_block_cu(
         f"window_size={window_size}, num_heads={num_heads}, "
         f"head_dim={head_dim}, dtype={dtype}, use_block_cu=True"
     )
-    print(f"[RUN ] {case_desc}")
+    _test_print(f"[RUN ] {case_desc}")
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
@@ -470,7 +482,7 @@ def _assert_close(
         f"window_size={window_size}, num_heads={num_heads}, "
         f"head_dim={head_dim}, use_block={use_block}"
     )
-    print(f"[RUN ] {case_desc}")
+    _test_print(f"[RUN ] {case_desc}")
     torch.manual_seed(seed)
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
@@ -532,11 +544,11 @@ def _assert_close(
         )
 
     assert out_toy.shape == out_ref.shape
-    assert torch.allclose(out_toy, out_ref, atol=2e-2, rtol=2e-2), (
+    assert torch.allclose(out_toy, out_ref, atol=2e-3, rtol=2e-3), (
         f"Mismatch with q_lens={q_lens}, k_lens={k_lens}, causal={causal}, "
         f"window_size={window_size}, use_block={use_block}"
     )
-    print(f"[PASS] {case_desc}")
+    _test_print(f"[PASS] {case_desc}")
 
 
 def _assert_close_with_block_cu(
@@ -561,18 +573,18 @@ def _assert_close_with_block_cu(
     )
 
     diff = (out_cu.float() - out_ref.float()).abs()
-    print("max diff:", diff.max().item())
-    print("mean diff:", diff.mean().item())
-    print("out_ref[0:5]:", out_ref[:5])
-    print("out_cu[0:5]:", out_cu[:5])
+    _test_print("max diff:", diff.max().item())
+    _test_print("mean diff:", diff.mean().item())
+    _test_print("out_ref[0:5]:", out_ref[:5])
+    _test_print("out_cu[0:5]:", out_cu[:5])
 
 
     assert out_cu.shape == out_ref.shape
-    assert torch.allclose(out_cu, out_ref, atol=1e-2, rtol=1e-2), (
+    assert torch.allclose(out_cu, out_ref, atol=2e-3, rtol=2e-3), (
         f"Mismatch with q_lens={q_lens}, k_lens={k_lens}, causal={causal}, "
         f"window_size={window_size}, use_block_cu=True"
     )
-    print(f"[PASS] {case_desc}")
+    _test_print(f"[PASS] {case_desc}")
 
 
 def _assert_dump_replay_close(dump_path: Path) -> None:
@@ -598,11 +610,11 @@ def _assert_dump_replay_close(dump_path: Path) -> None:
         block_table=block_table,
     )
     diff = (out_cu.float() - out_ref.float()).abs()
-    print(f"[REPLAY] dump={dump_path}")
-    print("max diff:", diff.max().item())
-    print("mean diff:", diff.mean().item())
+    _test_print(f"[REPLAY] dump={dump_path}")
+    _test_print("max diff:", diff.max().item())
+    _test_print("mean diff:", diff.mean().item())
     assert out_cu.shape == out_ref.shape
-    assert torch.allclose(out_cu, out_ref, atol=1e-2, rtol=1e-2), (
+    assert torch.allclose(out_cu, out_ref, atol=2e-3, rtol=2e-3), (
         f"Mismatch when replaying dumped context from {dump_path}"
     )
 
@@ -723,9 +735,13 @@ class FlashAttentionFuncCuKernelParityTest(unittest.TestCase):
         )
 
     def test_with_block_cu_known_negative_non_64_case(self) -> None:
-        raise unittest.SkipTest(
-            "with_block_cu currently requires head_dim >= 32; "
-            "non-64 small-head regression probes are masked at test level."
+        _assert_close_with_block_cu(
+            q_lens=[3, 4],
+            k_lens=None,
+            causal=False,
+            window_size=None,
+            num_heads=4,
+            head_dim=16,
         )
 
 
@@ -874,8 +890,8 @@ class FlashAttentionFuncCuKernelHeadDim64RegressionTest(unittest.TestCase):
     def test_with_block_cu_head_dim_coverage_targets(self) -> None:
         cases = [
             # {"q_lens": [2, 5], "num_heads": 1, "head_dim": 8},
-            # {"q_lens": [3, 4], "num_heads": 4, "head_dim": 16},
-            # {"q_lens": [2, 6], "num_heads": 2, "head_dim": 32},
+            {"q_lens": [3, 4], "num_heads": 4, "head_dim": 16},
+            {"q_lens": [2, 6], "num_heads": 2, "head_dim": 32},
             {"q_lens": [2, 6], "num_heads": 2, "head_dim": 64},
         ]
         for case in cases:
@@ -891,5 +907,5 @@ class FlashAttentionFuncCuKernelHeadDim64RegressionTest(unittest.TestCase):
 
 
 if __name__ == "__main__":
-    print("Running toy flash attention parity tests against official FA2...")
+    _test_print("Running toy flash attention parity tests against official FA2...")
     unittest.main(verbosity=2)
