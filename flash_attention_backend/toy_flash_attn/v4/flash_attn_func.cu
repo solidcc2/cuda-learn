@@ -383,7 +383,7 @@ template<typename scalar_t, typename inner_scalar_t>
 __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param) {
     extern __shared__ char smem[];
     TileLayout layout = TileLayout::builder(smem, param);
-#ifdef DEBUG_FLASH_ATTN_V3_TRACE
+#ifdef DEBUG_FLASH_ATTN_TRACE
     const bool debug_row =
         param.batch_id() == 0 &&
         param.head_id() == 0 &&
@@ -538,7 +538,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
                     bool valid_q_kv_pair = 
                         param.q_token_id() < param.q_seqlen() && layout.is_valid_kv(param.q_token_id(), kv_seq_id, q_kv_offset, kv_win);
 
-#ifdef DEBUG_FLASH_ATTN_V3_TRACE
+#ifdef DEBUG_FLASH_ATTN_TRACE
                     if (debug_row && threadIdx.y < param.q_chunk_size) {
                         printf(
                             "score_mask bid=%lld hid=%lld q=%lld kv=%lld qlen=%lld kvlen=%lld off=%lld "
@@ -693,7 +693,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
                 }
             } 
             __syncthreads();
-#ifdef DEBUG_FLASH_ATTN_V3_TRACE
+#ifdef DEBUG_FLASH_ATTN_TRACE
             if (debug_row && threadIdx.x == 0 && threadIdx.y < param.q_chunk_size) {
                 printf(
                     "chunk_softmax bid=%lld hid=%lld q=%lld chunk=%lld max=%f sum=%f\n",
@@ -828,7 +828,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
                     
                     if (threadIdx.x == 0) {
                         layout.out_reduction_at(threadIdx.y, head_off) = out;
-#ifdef DEBUG_FLASH_ATTN_V3_TRACE
+#ifdef DEBUG_FLASH_ATTN_TRACE
                         if (debug_row) {
                             printf(
                                 "sv_reduce bid=%lld hid=%lld q=%lld chunk=%lld head_off=%lld out=%f\n",
@@ -876,7 +876,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t>::kernel(ParamSet& param
                         layout.out_at(threadIdx.y, head_pos) = merge_e;
                     }
                 }
-#ifdef DEBUG_FLASH_ATTN_V3_TRACE
+#ifdef DEBUG_FLASH_ATTN_TRACE
                 if (debug_row && threadIdx.x == 0) {
                     printf(
                         "chunk_merge bid=%lld hid=%lld q=%lld chunk=%lld "
@@ -966,7 +966,7 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t>::flash_attn_varlen_with_b
         window_size_left, window_size_right,
         block_table, 
         out);
-#ifdef DEBUG_FLASH_ATTN_V3_TRACE
+#ifdef DEBUG_FLASH_ATTN_TRACE
     printf("########### flash attn v3 ###############\n");
 #endif
     int head_dim = q.size(2);

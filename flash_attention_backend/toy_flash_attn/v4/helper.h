@@ -4,7 +4,7 @@
 
 // # define TOY_FLASH_ATTN_ASSERT_ON
 // # define DEBUG_NUMERIC
-// # define DEBUG_FLASH_ATTN_V3_TRACE
+// # define DEBUG_FLASH_ATTN_TRACE
 
 #ifdef TOY_FLASH_ATTN_ASSERT_ON
 #define toy_flash_attn_assert(x) assert(x)
