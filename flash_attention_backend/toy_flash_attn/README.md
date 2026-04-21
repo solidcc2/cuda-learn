@@ -16,8 +16,10 @@
 
 - [flash_attention_func.py](/home/linf/code/cuda/flash_attention_backend/toy_flash_attn/flash_attention_func.py)
   统一入口、dump、调试打印、Python baseline。
+- [v4/flash_attn_func.cu](/home/linf/code/cuda/flash_attention_backend/toy_flash_attn/v4/flash_attn_func.cu)
+  当前默认 toy CUDA kernel，支持 bf16/fp32 CUDA 入口和 GQA head 映射。
 - [flash_attn_func_v3.cu](/home/linf/code/cuda/flash_attention_backend/toy_flash_attn/flash_attn_func_v3.cu)
-  当前 toy CUDA kernel。
+  旧版 toy CUDA kernel，仅保留 bf16 CUDA 入口，便于回归对照。
 - [flash_attention_func_test.py](/home/linf/code/cuda/flash_attention_backend/toy_flash_attn/flash_attention_func_test.py)
   单测、replay、回归 case。
 - [analyze_flash_attn_dumps.py](/home/linf/code/cuda/flash_attention_backend/toy_flash_attn/analyze_flash_attn_dumps.py)
@@ -39,10 +41,25 @@
 
 `block_table is not None` 时会走 paged 路径。当前分发由环境变量控制：
 
-- `TOY_FLASH_ATTN_USE_WITH_BLOCK=1`
+- `TOY_FLASH_ATTN_USE=reference`
   走 Python baseline：`flash_attn_varlen_with_block(...)`
-- 不设置，或设成其他值
-  走 CUDA：`flash_attn_varlen_with_block_cu(...)`
+- `TOY_FLASH_ATTN_USE=fp32`
+  走 v4 fp32 CUDA debug path：输入先升到 fp32，kernel 内 fp32 计算，再写回 bf16 `out`。
+- `TOY_FLASH_ATTN_USE=bf16`，或不设置
+  走 bf16 CUDA path：bf16 storage + fp32 accumulator。
+
+CUDA 源文件版本由另一个环境变量控制，必须在 import `flash_attention_func.py` 之前设置：
+
+- `TOY_FLASH_ATTN_CUDA_VERSION=v4`，或不设置
+  编译并加载 [v4/flash_attn_func.cu](/home/linf/code/cuda/flash_attention_backend/toy_flash_attn/v4/flash_attn_func.cu)。
+- `TOY_FLASH_ATTN_CUDA_VERSION=v3`
+  编译并加载 [flash_attn_func_v3.cu](/home/linf/code/cuda/flash_attention_backend/toy_flash_attn/flash_attn_func_v3.cu)。
+
+注意：
+
+- `TOY_FLASH_ATTN_USE=fp32` 只支持 `TOY_FLASH_ATTN_CUDA_VERSION=v4`。
+- v3 只导出 `flash_attn_varlen_with_block_v3`，不支持当前 v4 的 fp32 CUDA 入口。
+- 切换 `TOY_FLASH_ATTN_CUDA_VERSION` 后建议使用新的 Python 进程运行，避免已加载扩展复用旧版本。
 
 调试时常见做法：
 
@@ -96,7 +113,7 @@ dump 文件名形如：
 先让 `flash_attn_varlen_func(...)` 分发到 `flash_attn_varlen_with_block(...)`，再运行真实链路，例如：
 
 ```bash
-TOY_FLASH_ATTN_USE_WITH_BLOCK=1 \
+TOY_FLASH_ATTN_USE=reference \
 TOY_FLASH_ATTN_DUMP_DIR=$(pwd)/flash_attention_backend/base_gpt2.pt \
 python -m unittest flash_attention_backend.test_self_flash_attn_backend
 ```
@@ -108,6 +125,7 @@ python -m unittest flash_attention_backend.test_self_flash_attn_backend
 把分发切回 `flash_attn_varlen_with_block_cu(...)`，再跑同一条链路：
 
 ```bash
+TOY_FLASH_ATTN_USE=bf16 \
 TOY_FLASH_ATTN_DUMP_DIR=$(pwd)/flash_attention_backend/fp32_fp32_gpt2.pt \
 python -m unittest flash_attention_backend.test_self_flash_attn_backend
 ```
@@ -234,8 +252,11 @@ toy_flash_attn.flash_attention_func_test.FlashAttentionFuncCuKernelHeadDim64Regr
 
 ### 已知限制
 
+- v4 的可运行 head_dim 受 launch constraints 约束：
+  - `ceil(head_dim / K_X_STRIDE)` 必须是 2 的幂
+  - `Q_CHUNK_SIZE * ceil(head_dim / K_X_STRIDE)` 必须 warp 对齐
 - `test_with_block_cu_known_negative_non_64_case`
-  当前显式跳过。原因是 kernel 依赖 `blockDim.x >= 32`，小 head case 还没支持好。
+  当前已放开为 head_dim=16 的覆盖 case，不再是显式跳过的 known negative。
 
 ## 分析脚本
 
@@ -308,8 +329,15 @@ python flash_attention_backend/toy_flash_attn/analyze_flash_attn_dumps.py \
 
 - `TOY_FLASH_ATTN_DUMP_DIR`
   开启 dump。
-- `TOY_FLASH_ATTN_USE_WITH_BLOCK`
-  设为 `1` 时走 Python baseline；否则走 CUDA 实现。
+- `TOY_FLASH_ATTN_USE`
+  选择 attention 实现路径：
+  - `reference`：Python baseline
+  - `bf16`：bf16 CUDA path，默认值
+  - `fp32`：v4 fp32 CUDA debug path
+- `TOY_FLASH_ATTN_CUDA_VERSION`
+  选择编译/加载的 CUDA 源文件版本：
+  - `v4`：默认，加载 `v4/flash_attn_func.cu`
+  - `v3`：加载 `flash_attn_func_v3.cu`
 - `TOY_FLASH_ATTN_REPLAY_DUMP`
   replay 单测读取的 dump 路径。
 - `TOY_FLASH_ATTN_DEBUG=1`
@@ -319,7 +347,7 @@ python flash_attention_backend/toy_flash_attn/analyze_flash_attn_dumps.py \
 
 ### CUDA 侧
 
-在 [flash_attn_func_v3.cu](/home/linf/code/cuda/flash_attention_backend/toy_flash_attn/flash_attn_func_v3.cu) 顶部：
+v4 主要调试宏在 [v4/helper.h](/home/linf/code/cuda/flash_attention_backend/toy_flash_attn/v4/helper.h) 和 [v4/flash_attn_func.cu](/home/linf/code/cuda/flash_attention_backend/toy_flash_attn/v4/flash_attn_func.cu)：
 
 - `DEBUG_FLASH_ATTN_V3_TRACE`
   打开后打印：
@@ -329,6 +357,47 @@ python flash_attention_backend/toy_flash_attn/analyze_flash_attn_dumps.py \
   - `chunk_merge`
 - `DEBUG_NUMERIC`
   用于 `nan/non-finite` 检查
+
+v3 的对应宏仍在 [flash_attn_func_v3.cu](/home/linf/code/cuda/flash_attention_backend/toy_flash_attn/flash_attn_func_v3.cu) 内。
+
+## v4 fp32 shared memory 注意事项
+
+v4 的 `TOY_FLASH_ATTN_USE=fp32` 会使用 `FlashAttnTrait<float, float>`，中间 tile 都是 fp32，占用显著高于 bf16 storage path。
+
+当前 v4 顶部有 4 个会直接影响 block shape 和 shared memory 占用的常量：
+
+```cpp
+static const int32_t K_X_STRIDE = ...;
+static const int32_t Q_CHUNK_SIZE = ...;
+static const int32_t KV_CHUNK_SIZE = ...;
+static const int32_t BLOCK_Y = ...;
+```
+
+如果把 v4 配成较大的 tile，例如：
+
+```cpp
+K_X_STRIDE = 16
+Q_CHUNK_SIZE = 16
+KV_CHUNK_SIZE = 64
+BLOCK_Y = 64
+```
+
+fp32 path 很容易因为 dynamic shared memory 超过单 block 默认上限而启动失败，典型错误是：
+
+```text
+CUDA error: invalid argument
+```
+
+因此在使用 `TOY_FLASH_ATTN_USE=fp32` 做 debug/对拍时，需要修改上述 4 个常量，缩小 tile 占用后再运行。一个保守配置是：
+
+```cpp
+static const int32_t K_X_STRIDE = 4;
+static const int32_t Q_CHUNK_SIZE = 8;
+static const int32_t KV_CHUNK_SIZE = 8;
+static const int32_t BLOCK_Y = 8;
+```
+
+这个限制来自当前 v4 保留了较多中间 shared tile，例如 `score/max/sum/softmax/qk_reduction/sv_reduction/out_reduction`。后续如果改为 WMMA/CuTe 并复用或删除这些中间 tile，shared memory 压力可以下降。
 
 建议：
 

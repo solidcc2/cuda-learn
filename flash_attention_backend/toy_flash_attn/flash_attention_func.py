@@ -141,29 +141,39 @@ def _check_gqa_heads(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: tor
         )
 
 
-# compile + load cu
-_ops = load(
-    name="toy_torch_flash_attention_func",
-    sources=[
-        str(_THIS_DIR / "v4/flash_attn_func.cu"),
-    ],
-    extra_include_paths=[
-        str(_THIS_DIR / "v4"),
-    ],
-    extra_cflags=["-O2"],
-    extra_cuda_cflags=["-O2"],
-    verbose=True,
-)
-
-# _ops = load(
-#     name="toy_torch_flash_attention_func",
-#     sources=[
-#         str(_THIS_DIR / "flash_attn_func_v3.cu"),
-#     ],
-#     extra_cflags=["-O2"],
-#     extra_cuda_cflags=["-O2"],
-#     verbose=True,
-# )
+_CUDA_IMPL_VERSION = os.environ.get("TOY_FLASH_ATTN_CUDA_VERSION", "v4").lower()
+if _CUDA_IMPL_VERSION == "v3":
+    _ops = load(
+        name="toy_torch_flash_attention_func_v3",
+        sources=[
+            str(_THIS_DIR / "flash_attn_func_v3.cu"),
+        ],
+        extra_cflags=["-O2"],
+        extra_cuda_cflags=["-O2"],
+        verbose=True,
+    )
+    _ops.flash_attn_varlen_with_block_bf16fp32 = _ops.flash_attn_varlen_with_block_v3
+    _ops.flash_attn_varlen_with_block_fp32fp32 = None
+elif _CUDA_IMPL_VERSION == "v4":
+    _ops = load(
+        name="toy_torch_flash_attention_func_v4",
+        sources=[
+            str(_THIS_DIR / "v4/flash_attn_func.cu"),
+        ],
+        extra_include_paths=[
+            str(_THIS_DIR / "v4"),
+        ],
+        extra_cflags=["-O2"],
+        extra_cuda_cflags=["-O2"],
+        verbose=True,
+    )
+    _ops.flash_attn_varlen_with_block_bf16fp32 = _ops.flash_attn_varlen_with_block_v4_bf16fp32
+    _ops.flash_attn_varlen_with_block_fp32fp32 = _ops.flash_attn_varlen_with_block_v4_fp32fp32
+else:
+    raise ValueError(
+        "TOY_FLASH_ATTN_CUDA_VERSION must be either 'v3' or 'v4', "
+        f"got {_CUDA_IMPL_VERSION!r}"
+    )
 
 # layout: (2, num_blocks, block_size, num_kv_heads, head_size)
 def flash_attn_varlen_func(
@@ -477,7 +487,7 @@ def flash_attn_varlen_with_block_cu_bf16(
     _check_cuda_tensor("out", out, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
     _check_gqa_heads(q, k, v, out)
 
-    op_out = _ops.flash_attn_varlen_with_block_v4_bf16fp32(q, k, v,
+    op_out = _ops.flash_attn_varlen_with_block_bf16fp32(q, k, v,
                                     max_seqlen_q, cu_seqlens_q,
                                     max_seqlen_k, seqused_k,
                                     causal, window_size[0], window_size[1],
@@ -560,12 +570,17 @@ def flash_attn_varlen_with_block_cu_fp32(
     )
     _check_cuda_tensor("out", out, expected_device=expected_device, expected_dtype=_CUDA_VALUE_DTYPE)
     _check_gqa_heads(q, k, v, out)
+    if _ops.flash_attn_varlen_with_block_fp32fp32 is None:
+        raise ValueError(
+            "TOY_FLASH_ATTN_USE=fp32 requires TOY_FLASH_ATTN_CUDA_VERSION=v4; "
+            f"current version is {_CUDA_IMPL_VERSION!r}"
+        )
     q_fp32 = q.to(dtype=torch.float32)
     k_fp32 = k.to(dtype=torch.float32)
     v_fp32 = v.to(dtype=torch.float32)
     out_fp32 = torch.empty_like(q_fp32)
 
-    op_out = _ops.flash_attn_varlen_with_block_v4_fp32fp32(q_fp32, k_fp32, v_fp32,
+    op_out = _ops.flash_attn_varlen_with_block_fp32fp32(q_fp32, k_fp32, v_fp32,
                                     max_seqlen_q, cu_seqlens_q,
                                     max_seqlen_k, seqused_k,
                                     causal, window_size[0], window_size[1],
