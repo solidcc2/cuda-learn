@@ -1,0 +1,6 @@
+interface:
+  display_name: "Flash Attention Performance Report"
+  short_description: "Update benchmark report from JSON logs"
+  default_prompt: "Use $flash-attention-performance-report to update the performance report from benchmark results."
+policy:
+  allow_implicit_invocation: true

@@ -1,6 +1,6 @@
 ---
 name: flash-attention-performance-report
-description: Use when updating the toy_flash_attn performance evaluation report from benchmark logs or perf_eval_results.json. Covers the repository workflow for running analysis scripts, parsing structured results, and updating PERFORMANCE_EVAL.md while keeping information orthogonal and avoiding absolute paths or private local paths.
+description: Update the flash_attention_backend performance evaluation report from benchmark logs or perf_eval_results.json. Use when refreshing flash_attention_backend/docs/PERFORMANCE_EVAL.md, interpreting analysis/run_perf_eval.sh outputs, validating parsed benchmark JSON, or filling report tables while keeping scope, environment, correctness, performance, version analysis, and conclusions orthogonal and avoiding absolute or private local paths.
 ---
 
 # Flash Attention Performance Report

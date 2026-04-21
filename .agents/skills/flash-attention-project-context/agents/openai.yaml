@@ -1,0 +1,6 @@
+interface:
+  display_name: "Flash Attention Project Context"
+  short_description: "Verify flash_attention_backend project state"
+  default_prompt: "Use $flash-attention-project-context to verify current flash_attention_backend state before answering."
+policy:
+  allow_implicit_invocation: true
