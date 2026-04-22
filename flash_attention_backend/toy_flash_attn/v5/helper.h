@@ -1,3 +1,4 @@
+#include "torch/headeronly/util/BFloat16.h"
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 
@@ -78,4 +79,33 @@ __device__ inline void busy_wait(unsigned long long delay_cycles) {
     while (clock64() - start < delay_cycles) {
     }
 }
+
+template<typename T>
+struct WmmaElement;
+
+template<>
+struct WmmaElement<at::BFloat16> {
+    using type = __nv_bfloat16;
+
+    static __device__ inline type* ptr(at::BFloat16* p) {
+        return reinterpret_cast<type*>(p);
+    }
+
+    static __device__ inline const type* ptr(const at::BFloat16* p) {
+        return reinterpret_cast<const type*>(p);
+    }
+};
+
+template<>
+struct WmmaElement<float> {
+    using type = float;
+
+    static __device__ inline type* ptr(float* p) {
+        return reinterpret_cast<type*>(p);
+    }
+
+    static __device__ inline const type* ptr(const float* p) {
+        return reinterpret_cast<const type*>(p);
+    }
+};
 
