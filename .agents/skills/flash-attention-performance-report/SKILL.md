@@ -1,6 +1,6 @@
 ---
 name: flash-attention-performance-report
-description: Update the flash_attention_backend performance evaluation report from benchmark logs or perf_eval_results.json. Use when refreshing flash_attention_backend/docs/PERFORMANCE_EVAL.md, interpreting analysis/run_perf_eval.sh outputs, validating parsed benchmark JSON, or filling report tables while keeping scope, environment, correctness, performance, version analysis, and conclusions orthogonal and avoiding absolute or private local paths.
+description: Update the flash_attention_backend performance evaluation report from benchmark logs or perf_eval_results.json. Use when refreshing flash_attention_backend/docs/PERFORMANCE_EVAL.md, interpreting analysis/run_perf_eval.sh outputs, validating parsed benchmark JSON, extending report coverage to new backend versions, or filling report tables while keeping scope, environment, correctness, performance, version analysis, and conclusions orthogonal and avoiding absolute or private local paths.
 ---
 
 # Flash Attention Performance Report
@@ -16,6 +16,7 @@ Use this skill when the task is to update `flash_attention_backend/docs/PERFORMA
 - Do not infer missing results. Mark missing or invalid data as `未采集` or `无有效数据`.
 - Do not mix future optimization plans into the report. The report should describe measured facts and current-version analysis.
 - Treat `perf_eval_results.json` as a measurement artifact, not as truth if the corresponding log shows an error.
+- Do not hard-code the report to a historical backend version set. Derive the current version set from benchmark artifacts and current source files.
 
 ## Expected Files
 
@@ -42,6 +43,19 @@ version:model:batch:max_tokens
 Supported versions are defined by `run_perf_eval.sh`. Before documenting backend semantics, inspect the current script and `test_self_flash_attn_backend.py`; do not assume old environment-variable behavior.
 
 The shell script writes raw logs to `analysis/perf_logs/` and then regenerates `analysis/perf_eval_results.json`.
+
+## Version Extensibility
+
+Treat backend versions as data discovered from the current repository, not as fixed skill knowledge.
+
+When updating the report:
+
+- Discover requested/default cases from `run_perf_eval.sh`, especially `DEFAULT_CASES`, `usage()`, and the `case "${version}"` mapping.
+- Discover measured cases from `perf_eval_results.json` and validate suspicious rows against `analysis/perf_logs/*.log`.
+- Discover backend semantics from current source files, especially `test_self_flash_attn_backend.py` and the toy attention wrapper. If a version-specific CUDA source exists, inspect it before writing kernel-specific claims.
+- Include every version that is in scope for the current report artifacts. Add report rows or version-analysis subsections for new versions when data or source semantics justify them.
+- Do not require a skill update for a new version such as `v6` unless the benchmark artifact schema, report structure, or validation workflow changes.
+- If version metadata becomes repetitive, prefer adding a repo artifact such as `analysis/perf_eval_versions.json` or a docs reference, then make the skill read that artifact instead of embedding per-version facts.
 
 ## JSON Review Checklist
 
@@ -73,7 +87,8 @@ When filling `PERFORMANCE_EVAL.md`:
 - Feature boundary table should contain capability statements, not performance claims.
 - Correctness section should only contain unittest or numerical comparison data. Do not fill it from generation benchmark JSON.
 - Performance section should contain only measured benchmark numbers.
-- Version analysis should explain current observed behavior by version.
+- Version analysis should explain current observed behavior by discovered version.
+- Keep comparison tables shape-compatible with the discovered case set. Add or remove rows/columns based on current measured cases instead of preserving stale version-specific rows.
 - Conclusion should be short and derived directly from filled tables.
 
 Use explicit labels:

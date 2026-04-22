@@ -20,8 +20,8 @@ It is a navigation map, not a source of truth. Before giving conclusions or maki
 
 | Field | Value |
 | --- | --- |
-| last_verified_commit | `5a5b3a68b52dca7adead05c22e173dae3967438c` |
-| refresh_scope | Created from current project files; focused on runtime dispatch, v4 kernel, benchmark, report workflow, and project-context maintenance. |
+| last_verified_commit | `7f27dbaed7d2947bd14232088261211c607fbec4` |
+| refresh_scope | Incremental refresh for v5 CUDA dispatch and benchmark workflow support. |
 
 When current `git rev-parse HEAD` differs from `last_verified_commit`, refresh this map before relying on it.
 
@@ -36,6 +36,7 @@ Refresh mode:
 | --- | --- | --- |
 | toy attention package | Python wrapper, CUDA extension loading, reference implementation | `flash_attention_backend/toy_flash_attn/flash_attention_func.py` |
 | v4 CUDA kernel | Current toy CUDA kernel | `flash_attention_backend/toy_flash_attn/v4/flash_attn_func.cu`, `flash_attention_backend/toy_flash_attn/v4/helper.h` |
+| v5 CUDA kernel | WMMA/Tensor Core toy CUDA kernel | `flash_attention_backend/toy_flash_attn/v5/flash_attn_func.cu`, `flash_attention_backend/toy_flash_attn/v5/helper.h` |
 | v3 CUDA kernel | Older CUDA implementation | `flash_attention_backend/toy_flash_attn/flash_attn_func_v3.cu` |
 | vLLM smoke runner | End-to-end generation entrypoint | `flash_attention_backend/test_self_flash_attn_backend.py` |
 | benchmark analysis | Shell orchestration, log parser, JSON output | `flash_attention_backend/analysis/run_perf_eval.sh`, `flash_attention_backend/analysis/parse_perf_eval_logs.py` |
@@ -49,7 +50,7 @@ Verify these in code before relying on them.
 | Variable | Current role | Primary files to check |
 | --- | --- | --- |
 | `TOY_FLASH_ATTN_USE` | Selects reference / bf16 / fp32 path in wrapper; selects official / custom backend in smoke runner; used by benchmark shell cases | `toy_flash_attn/flash_attention_func.py`, `test_self_flash_attn_backend.py`, `analysis/run_perf_eval.sh` |
-| `TOY_FLASH_ATTN_CUDA_VERSION` | Selects v3 or v4 extension at import time | `toy_flash_attn/flash_attention_func.py`, `analysis/run_perf_eval.sh`, `toy_flash_attn/README.md` |
+| `TOY_FLASH_ATTN_CUDA_VERSION` | Selects v3, v4, or v5 extension at import time | `toy_flash_attn/flash_attention_func.py`, `analysis/run_perf_eval.sh`, `toy_flash_attn/README.md` |
 | `TOY_FLASH_ATTN_DEBUG` | Prints wrapper input tensor metadata | `toy_flash_attn/flash_attention_func.py` |
 | `TOY_FLASH_ATTN_PRINT_DTYPE` | Prints Python reference dtype trace | `toy_flash_attn/flash_attention_func.py` |
 | `TOY_FLASH_ATTN_DUMP_DIR` | Dumps attention context for replay/debug | `toy_flash_attn/flash_attention_func.py`, `toy_flash_attn/README.md` |
@@ -73,16 +74,16 @@ Current facts to verify before use:
 
 - `TOY_FLASH_ATTN_USE=reference` routes to Python reference for paged attention.
 - `TOY_FLASH_ATTN_USE=fp32` routes to v4 fp32 CUDA wrapper.
-- default/custom bf16 path routes to v4/v3 bf16 op depending on loaded CUDA version.
+- default/custom bf16 path routes to v5/v4/v3 bf16 op depending on loaded CUDA version.
 - `TOY_FLASH_ATTN_USE=official` is interpreted by the vLLM smoke runner as official FlashAttention backend.
 - The smoke runner may still accept old misspelling `offical`; verify current code before documenting this.
 
 ## CUDA Version Loading Dependency
 
-When changing v3/v4 loading or op aliases, check:
+When changing v3/v4/v5 loading or op aliases, check:
 
 - extension `load(...)` block in `toy_flash_attn/flash_attention_func.py`;
-- v3 and v4 op names exported by CUDA bindings;
+- v3, v4, and v5 op names exported by CUDA bindings;
 - wrapper calls using `_ops.flash_attn_varlen_with_block_bf16fp32`;
 - fp32 wrapper availability check;
 - benchmark case mapping in `analysis/run_perf_eval.sh`;
@@ -93,6 +94,7 @@ Current facts to verify before use:
 - default CUDA implementation version is `v4`;
 - v3 registers only bf16 alias and has no fp32 op alias;
 - v4 registers bf16 and fp32 op aliases.
+- v5 registers bf16 WMMA aliases for supported head-dim specializations; verify current exported op names before use.
 
 ## v4 Kernel Dependency
 
@@ -148,6 +150,7 @@ Important report rule:
 
 - Do not copy absolute paths from JSON into the report.
 - If logs are stale or contain shell/runtime errors, do not treat parsed rows as valid performance data.
+- Keep performance report updates version-extensible: derive the in-scope version set from current benchmark cases, JSON, logs, and source semantics instead of preserving stale report rows.
 
 ## Quick Verification Patterns
 
@@ -156,6 +159,7 @@ Use these searches before answering related questions:
 ```bash
 rg -n "TOY_FLASH_ATTN_USE|TOY_FLASH_ATTN_CUDA_VERSION" flash_attention_backend
 rg -n "K_X_STRIDE|Q_CHUNK_SIZE|KV_CHUNK_SIZE|BLOCK_Y" flash_attention_backend/toy_flash_attn/v4
+rg -n "MMA_Q_CHUNK_SIZE|MMA_K_CHUNK_SIZE|MMA_HEAD_CHUNK_SIZE|KV_CHUNK_SIZE" flash_attention_backend/toy_flash_attn/v5
 rg -n "official|offical|FLASH_ATTN|CUSTOM" flash_attention_backend/test_self_flash_attn_backend.py flash_attention_backend/analysis
 rg -n "PERFORMANCE_EVAL|perf_eval_results|perf_logs" flash_attention_backend
 ```

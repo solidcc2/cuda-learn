@@ -14,9 +14,12 @@ OUT_JSON="${PERF_EVAL_OUTPUT:-${SCRIPT_DIR}/perf_eval_results.json}"
 DEFAULT_CASES=(
   "v4:qwen:1:128"
   "v4:qwen:4:128"
+  "v5:qwen:1:128"
+  "v5:qwen:4:128"
   "official:qwen:1:128"
   "official:qwen:4:128"
   "v4:gpt2:1:128"
+  "v5:gpt2:1:128"
   "official:gpt2:1:128"
 )
 
@@ -33,11 +36,12 @@ Known versions:
   v3         -> TOY_FLASH_ATTN_USE=bf16, TOY_FLASH_ATTN_CUDA_VERSION=v3
   v4         -> TOY_FLASH_ATTN_USE=bf16, TOY_FLASH_ATTN_CUDA_VERSION=v4
   v4_fp32    -> TOY_FLASH_ATTN_USE=fp32, TOY_FLASH_ATTN_CUDA_VERSION=v4
+  v5         -> TOY_FLASH_ATTN_USE=bf16, TOY_FLASH_ATTN_CUDA_VERSION=v5
   official   -> TOY_FLASH_ATTN_USE=official
 
 Examples:
   bash flash_attention_backend/analysis/run_perf_eval.sh
-  bash flash_attention_backend/analysis/run_perf_eval.sh v4:qwen:1:128 official:qwen:1:128
+  bash flash_attention_backend/analysis/run_perf_eval.sh v5:qwen:1:128 official:qwen:1:128
 
 Environment:
   PYTHON_BIN             Python executable. Default: python
@@ -83,6 +87,13 @@ run_case() {
       env \
         TOY_FLASH_ATTN_USE=fp32 \
         TOY_FLASH_ATTN_CUDA_VERSION=v4 \
+        "${PYTHON_BIN}" "${RUNNER}" -m "${model}" -b "${batch}" -t "${max_tokens}" \
+        >"${log_path}" 2>&1
+      ;;
+    v5)
+      env \
+        TOY_FLASH_ATTN_USE=bf16 \
+        TOY_FLASH_ATTN_CUDA_VERSION=v5 \
         "${PYTHON_BIN}" "${RUNNER}" -m "${model}" -b "${batch}" -t "${max_tokens}" \
         >"${log_path}" 2>&1
       ;;
