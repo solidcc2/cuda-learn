@@ -277,3 +277,57 @@ Used XX registers
 spill stores
 spill loads
 ```
+
+# CuTe & torch相关要点
+
+1. kernel要加CudaGuard,防止跑错device,维护设备上下文的自动切换。
+
+```c++
+  const c10::cuda::CUDAGuard device_guard(x.device());
+```
+
+2. launch kernel时，要显式指定getstream, 防止跑到默认stream,防止和torch当前的工作stream不是一个stream,导致数据不同步，顺序关系破坏
+
+```c++
+  toy_cute_demo::cute_bias_add_kernel<kTileM, kTileN>
+      <<<grid, block, 0, at::cuda::getCurrentCUDAStream()>>>(
+      x.data_ptr<float>(),
+      bias.data_ptr<float>(),
+      y.data_ptr<float>(),
+      m,
+      n);
+```
+
+3. CuTe喜欢编译期，用cute::Int<1>{}之类的空结构体，在编译期通过类型系统提供更多优化。
+
+通过传入带类型数值特化的空结构体，在运行期给callee实际上没有传参数，但是在编译期间传入了类型信息，实现模板特化，完成编译优化。
+
+4. cute常见数据流
+```
+gmem tensor -> smem tensor -> register tensor -> MMA -> register accumulator -> gmem output
+```
+
+5. swizzle是一种布局技巧，一种地址映射，提供可逆变换，减少smem载入到rmem时的bank conflict。
+```
+输入：
+B = mbit
+M = mbase
+S = sshift
+row, col = logical coordinate
+sr = stride_row
+sc = stride_col
+地址变换
+offset = row * sr + col * sc
+mask = (1 << B) - 1
+
+if S > 0:
+  y = (offset >> (M + S)) & mask
+  physical_offset = offset ^ (y << M)
+
+if S < 0:
+  y = (offset >> M) & mask
+  physical_offset = offset ^ (y << (M - S))
+
+```
+bank本质可以理解为，shared memory有32路存储器，地址线交错排布，32个存储器带宽并行叠加。减少bank conflict要
+看一个 warp 的一次访存指令里，物理地址落到同一个 bank 的“不同地址”数量。在评估访存bank conflict程度时，就是对一个warp的一次访存行为，算出物理地址集合，对32取模，看看分散程度。

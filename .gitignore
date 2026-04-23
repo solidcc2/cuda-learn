@@ -9,3 +9,5 @@ perf_logs
 .clangd
 .vscode
 .codex
+compile_commands.json
+.cache
