@@ -1,15 +1,15 @@
 {
   "environment": {
-    "created_at": "2026-04-22T07:51:21.748235+00:00",
+    "created_at": "2026-04-23T01:41:36.816772+00:00",
     "python": "3.10.12",
-    "git_commit": "7f27dbaed7d2947bd14232088261211c607fbec4",
+    "git_commit": "541a77f073e7b8ed5bf84c1a620a076f7e6fa8b9",
     "torch": "2.10.0+cu128",
     "cuda": "12.8",
     "cuda_available": true,
     "gpu": "NVIDIA GeForce RTX 2050",
     "vllm": "0.17.1"
   },
-  "log_dir": "/home/linf/code/cuda/flash_attention_backend/analysis/perf_logs",
+  "log_dir": "flash_attention_backend/analysis/perf_logs",
   "benchmarks": [
     {
       "case_name": "baseline_qwen_b1_t128",
@@ -17,16 +17,28 @@
       "model_arg": "qwen",
       "batch": 1,
       "max_tokens": 128,
-      "log_path": "perf_logs/baseline_qwen_b1_t128.log",
+      "log_path": "flash_attention_backend/analysis/perf_logs/baseline_qwen_b1_t128.log",
       "success": true,
-      "config": {},
-      "input_toks_per_s": null,
-      "output_toks_per_s": null,
-      "wall_time_s": null,
+      "config": {
+        "model": "Qwen/Qwen2.5-0.5B-Instruct",
+        "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+        "TOY_FLASH_ATTN_USE": "reference",
+        "attention_backend": "CUSTOM",
+        "kv_cache_dtype arg": "bfloat16",
+        "batch_size": "1",
+        "max_tokens": "128",
+        "cache_config.cache_dtype": "bfloat16",
+        "model_config.dtype": "torch.bfloat16",
+        "resolved kv torch dtype": "torch.bfloat16"
+      },
+      "input_toks_per_s": 1.14,
+      "output_toks_per_s": 18.19,
+      "wall_time_s": 7.04,
       "finish_reasons": [],
-      "prompt_count": 0,
-      "generated_count": 0,
-      "error": null
+      "prompt_count": 1,
+      "generated_count": 1,
+      "error": null,
+      "output_toks_per_s_per_request": 18.19
     },
     {
       "case_name": "official_gpt2_b1_t128",
@@ -34,7 +46,7 @@
       "model_arg": "gpt2",
       "batch": 1,
       "max_tokens": 128,
-      "log_path": "perf_logs/official_gpt2_b1_t128.log",
+      "log_path": "flash_attention_backend/analysis/perf_logs/official_gpt2_b1_t128.log",
       "success": true,
       "config": {
         "model": "gpt2",
@@ -48,14 +60,14 @@
         "model_config.dtype": "torch.bfloat16",
         "resolved kv torch dtype": "torch.bfloat16"
       },
-      "input_toks_per_s": 19.15,
-      "output_toks_per_s": 306.43,
+      "input_toks_per_s": 18.87,
+      "output_toks_per_s": 301.93,
       "wall_time_s": null,
       "finish_reasons": [],
       "prompt_count": 1,
       "generated_count": 1,
       "error": null,
-      "output_toks_per_s_per_request": 306.43
+      "output_toks_per_s_per_request": 301.93
     },
     {
       "case_name": "official_qwen_b1_t128",
@@ -63,7 +75,7 @@
       "model_arg": "qwen",
       "batch": 1,
       "max_tokens": 128,
-      "log_path": "perf_logs/official_qwen_b1_t128.log",
+      "log_path": "flash_attention_backend/analysis/perf_logs/official_qwen_b1_t128.log",
       "success": true,
       "config": {
         "model": "Qwen/Qwen2.5-0.5B-Instruct",
@@ -77,14 +89,43 @@
         "model_config.dtype": "torch.bfloat16",
         "resolved kv torch dtype": "torch.bfloat16"
       },
-      "input_toks_per_s": 5.32,
-      "output_toks_per_s": 85.19,
-      "wall_time_s": 1.5,
+      "input_toks_per_s": 5.31,
+      "output_toks_per_s": 84.91,
+      "wall_time_s": 1.51,
       "finish_reasons": [],
       "prompt_count": 1,
       "generated_count": 1,
       "error": null,
-      "output_toks_per_s_per_request": 85.19
+      "output_toks_per_s_per_request": 84.91
+    },
+    {
+      "case_name": "official_qwen_b1_t512",
+      "version": "official",
+      "model_arg": "qwen",
+      "batch": 1,
+      "max_tokens": 512,
+      "log_path": "flash_attention_backend/analysis/perf_logs/official_qwen_b1_t512.log",
+      "success": true,
+      "config": {
+        "model": "Qwen/Qwen2.5-0.5B-Instruct",
+        "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+        "TOY_FLASH_ATTN_USE": "official",
+        "attention_backend": "FLASH_ATTN",
+        "kv_cache_dtype arg": "auto",
+        "batch_size": "1",
+        "max_tokens": "512",
+        "cache_config.cache_dtype": "auto",
+        "model_config.dtype": "torch.bfloat16",
+        "resolved kv torch dtype": "torch.bfloat16"
+      },
+      "input_toks_per_s": 1.35,
+      "output_toks_per_s": 85.26,
+      "wall_time_s": 5.91,
+      "finish_reasons": [],
+      "prompt_count": 1,
+      "generated_count": 1,
+      "error": null,
+      "output_toks_per_s_per_request": 85.26
     },
     {
       "case_name": "official_qwen_b4_t128",
@@ -92,7 +133,7 @@
       "model_arg": "qwen",
       "batch": 4,
       "max_tokens": 128,
-      "log_path": "perf_logs/official_qwen_b4_t128.log",
+      "log_path": "flash_attention_backend/analysis/perf_logs/official_qwen_b4_t128.log",
       "success": true,
       "config": {
         "model": "Qwen/Qwen2.5-0.5B-Instruct",
@@ -106,14 +147,43 @@
         "model_config.dtype": "torch.bfloat16",
         "resolved kv torch dtype": "torch.bfloat16"
       },
-      "input_toks_per_s": 21.03,
-      "output_toks_per_s": 316.63,
-      "wall_time_s": 1.6,
+      "input_toks_per_s": 21.0,
+      "output_toks_per_s": 316.21,
+      "wall_time_s": 1.61,
       "finish_reasons": [],
       "prompt_count": 4,
       "generated_count": 4,
       "error": null,
-      "output_toks_per_s_per_request": 79.1575
+      "output_toks_per_s_per_request": 79.0525
+    },
+    {
+      "case_name": "official_qwen_b4_t512",
+      "version": "official",
+      "model_arg": "qwen",
+      "batch": 4,
+      "max_tokens": 512,
+      "log_path": "flash_attention_backend/analysis/perf_logs/official_qwen_b4_t512.log",
+      "success": true,
+      "config": {
+        "model": "Qwen/Qwen2.5-0.5B-Instruct",
+        "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+        "TOY_FLASH_ATTN_USE": "official",
+        "attention_backend": "FLASH_ATTN",
+        "kv_cache_dtype arg": "auto",
+        "batch_size": "4",
+        "max_tokens": "512",
+        "cache_config.cache_dtype": "auto",
+        "model_config.dtype": "torch.bfloat16",
+        "resolved kv torch dtype": "torch.bfloat16"
+      },
+      "input_toks_per_s": 5.38,
+      "output_toks_per_s": 266.06,
+      "wall_time_s": 1.58,
+      "finish_reasons": [],
+      "prompt_count": 4,
+      "generated_count": 4,
+      "error": null,
+      "output_toks_per_s_per_request": 66.515
     },
     {
       "case_name": "v4_gpt2_b1_t128",
@@ -121,7 +191,7 @@
       "model_arg": "gpt2",
       "batch": 1,
       "max_tokens": 128,
-      "log_path": "perf_logs/v4_gpt2_b1_t128.log",
+      "log_path": "flash_attention_backend/analysis/perf_logs/v4_gpt2_b1_t128.log",
       "success": true,
       "config": {
         "model": "gpt2",
@@ -135,14 +205,14 @@
         "model_config.dtype": "torch.bfloat16",
         "resolved kv torch dtype": "torch.bfloat16"
       },
-      "input_toks_per_s": 3.52,
-      "output_toks_per_s": 56.29,
-      "wall_time_s": 2.27,
+      "input_toks_per_s": 3.46,
+      "output_toks_per_s": 55.39,
+      "wall_time_s": 2.31,
       "finish_reasons": [],
       "prompt_count": 1,
       "generated_count": 1,
       "error": null,
-      "output_toks_per_s_per_request": 56.29
+      "output_toks_per_s_per_request": 55.39
     },
     {
       "case_name": "v4_qwen_b1_t128",
@@ -150,7 +220,7 @@
       "model_arg": "qwen",
       "batch": 1,
       "max_tokens": 128,
-      "log_path": "perf_logs/v4_qwen_b1_t128.log",
+      "log_path": "flash_attention_backend/analysis/perf_logs/v4_qwen_b1_t128.log",
       "success": true,
       "config": {
         "model": "Qwen/Qwen2.5-0.5B-Instruct",
@@ -164,14 +234,43 @@
         "model_config.dtype": "torch.bfloat16",
         "resolved kv torch dtype": "torch.bfloat16"
       },
-      "input_toks_per_s": 1.54,
-      "output_toks_per_s": 24.62,
-      "wall_time_s": 5.2,
+      "input_toks_per_s": 1.53,
+      "output_toks_per_s": 24.5,
+      "wall_time_s": 5.23,
       "finish_reasons": [],
       "prompt_count": 1,
       "generated_count": 1,
       "error": null,
-      "output_toks_per_s_per_request": 24.62
+      "output_toks_per_s_per_request": 24.5
+    },
+    {
+      "case_name": "v4_qwen_b1_t512",
+      "version": "v4",
+      "model_arg": "qwen",
+      "batch": 1,
+      "max_tokens": 512,
+      "log_path": "flash_attention_backend/analysis/perf_logs/v4_qwen_b1_t512.log",
+      "success": true,
+      "config": {
+        "model": "Qwen/Qwen2.5-0.5B-Instruct",
+        "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+        "TOY_FLASH_ATTN_USE": "bf16",
+        "attention_backend": "CUSTOM",
+        "kv_cache_dtype arg": "bfloat16",
+        "batch_size": "1",
+        "max_tokens": "512",
+        "cache_config.cache_dtype": "bfloat16",
+        "model_config.dtype": "torch.bfloat16",
+        "resolved kv torch dtype": "torch.bfloat16"
+      },
+      "input_toks_per_s": 0.19,
+      "output_toks_per_s": 12.04,
+      "wall_time_s": 41.87,
+      "finish_reasons": [],
+      "prompt_count": 1,
+      "generated_count": 1,
+      "error": null,
+      "output_toks_per_s_per_request": 12.04
     },
     {
       "case_name": "v4_qwen_b4_t128",
@@ -179,7 +278,7 @@
       "model_arg": "qwen",
       "batch": 4,
       "max_tokens": 128,
-      "log_path": "perf_logs/v4_qwen_b4_t128.log",
+      "log_path": "flash_attention_backend/analysis/perf_logs/v4_qwen_b4_t128.log",
       "success": true,
       "config": {
         "model": "Qwen/Qwen2.5-0.5B-Instruct",
@@ -194,13 +293,42 @@
         "resolved kv torch dtype": "torch.bfloat16"
       },
       "input_toks_per_s": 3.99,
-      "output_toks_per_s": 60.14,
+      "output_toks_per_s": 60.03,
       "wall_time_s": 2.13,
       "finish_reasons": [],
       "prompt_count": 4,
       "generated_count": 4,
       "error": null,
-      "output_toks_per_s_per_request": 15.035
+      "output_toks_per_s_per_request": 15.0075
+    },
+    {
+      "case_name": "v4_qwen_b4_t512",
+      "version": "v4",
+      "model_arg": "qwen",
+      "batch": 4,
+      "max_tokens": 512,
+      "log_path": "flash_attention_backend/analysis/perf_logs/v4_qwen_b4_t512.log",
+      "success": true,
+      "config": {
+        "model": "Qwen/Qwen2.5-0.5B-Instruct",
+        "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+        "TOY_FLASH_ATTN_USE": "bf16",
+        "attention_backend": "CUSTOM",
+        "kv_cache_dtype arg": "bfloat16",
+        "batch_size": "4",
+        "max_tokens": "512",
+        "cache_config.cache_dtype": "bfloat16",
+        "model_config.dtype": "torch.bfloat16",
+        "resolved kv torch dtype": "torch.bfloat16"
+      },
+      "input_toks_per_s": 0.45,
+      "output_toks_per_s": 22.12,
+      "wall_time_s": 18.99,
+      "finish_reasons": [],
+      "prompt_count": 4,
+      "generated_count": 4,
+      "error": null,
+      "output_toks_per_s_per_request": 5.53
     },
     {
       "case_name": "v5_gpt2_b1_t128",
@@ -208,7 +336,7 @@
       "model_arg": "gpt2",
       "batch": 1,
       "max_tokens": 128,
-      "log_path": "perf_logs/v5_gpt2_b1_t128.log",
+      "log_path": "flash_attention_backend/analysis/perf_logs/v5_gpt2_b1_t128.log",
       "success": true,
       "config": {
         "model": "gpt2",
@@ -222,14 +350,14 @@
         "model_config.dtype": "torch.bfloat16",
         "resolved kv torch dtype": "torch.bfloat16"
       },
-      "input_toks_per_s": 9.54,
-      "output_toks_per_s": 152.58,
+      "input_toks_per_s": 8.95,
+      "output_toks_per_s": 143.25,
       "wall_time_s": null,
       "finish_reasons": [],
       "prompt_count": 1,
       "generated_count": 1,
       "error": null,
-      "output_toks_per_s_per_request": 152.58
+      "output_toks_per_s_per_request": 143.25
     },
     {
       "case_name": "v5_qwen_b1_t128",
@@ -237,7 +365,7 @@
       "model_arg": "qwen",
       "batch": 1,
       "max_tokens": 128,
-      "log_path": "perf_logs/v5_qwen_b1_t128.log",
+      "log_path": "flash_attention_backend/analysis/perf_logs/v5_qwen_b1_t128.log",
       "success": true,
       "config": {
         "model": "Qwen/Qwen2.5-0.5B-Instruct",
@@ -251,14 +379,43 @@
         "model_config.dtype": "torch.bfloat16",
         "resolved kv torch dtype": "torch.bfloat16"
       },
-      "input_toks_per_s": 3.53,
-      "output_toks_per_s": 56.4,
-      "wall_time_s": 2.27,
+      "input_toks_per_s": 3.57,
+      "output_toks_per_s": 57.11,
+      "wall_time_s": 2.24,
       "finish_reasons": [],
       "prompt_count": 1,
       "generated_count": 1,
       "error": null,
-      "output_toks_per_s_per_request": 56.4
+      "output_toks_per_s_per_request": 57.11
+    },
+    {
+      "case_name": "v5_qwen_b1_t512",
+      "version": "v5",
+      "model_arg": "qwen",
+      "batch": 1,
+      "max_tokens": 512,
+      "log_path": "flash_attention_backend/analysis/perf_logs/v5_qwen_b1_t512.log",
+      "success": true,
+      "config": {
+        "model": "Qwen/Qwen2.5-0.5B-Instruct",
+        "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+        "TOY_FLASH_ATTN_USE": "bf16",
+        "attention_backend": "CUSTOM",
+        "kv_cache_dtype arg": "bfloat16",
+        "batch_size": "1",
+        "max_tokens": "512",
+        "cache_config.cache_dtype": "bfloat16",
+        "model_config.dtype": "torch.bfloat16",
+        "resolved kv torch dtype": "torch.bfloat16"
+      },
+      "input_toks_per_s": 0.81,
+      "output_toks_per_s": 51.09,
+      "wall_time_s": 9.87,
+      "finish_reasons": [],
+      "prompt_count": 1,
+      "generated_count": 1,
+      "error": null,
+      "output_toks_per_s_per_request": 51.09
     },
     {
       "case_name": "v5_qwen_b4_t128",
@@ -266,7 +423,7 @@
       "model_arg": "qwen",
       "batch": 4,
       "max_tokens": 128,
-      "log_path": "perf_logs/v5_qwen_b4_t128.log",
+      "log_path": "flash_attention_backend/analysis/perf_logs/v5_qwen_b4_t128.log",
       "success": true,
       "config": {
         "model": "Qwen/Qwen2.5-0.5B-Instruct",
@@ -280,14 +437,43 @@
         "model_config.dtype": "torch.bfloat16",
         "resolved kv torch dtype": "torch.bfloat16"
       },
-      "input_toks_per_s": 13.48,
-      "output_toks_per_s": 202.94,
-      "wall_time_s": 2.52,
+      "input_toks_per_s": 13.52,
+      "output_toks_per_s": 203.63,
+      "wall_time_s": 2.51,
       "finish_reasons": [],
       "prompt_count": 4,
       "generated_count": 4,
       "error": null,
-      "output_toks_per_s_per_request": 50.735
+      "output_toks_per_s_per_request": 50.9075
+    },
+    {
+      "case_name": "v5_qwen_b4_t512",
+      "version": "v5",
+      "model_arg": "qwen",
+      "batch": 4,
+      "max_tokens": 512,
+      "log_path": "flash_attention_backend/analysis/perf_logs/v5_qwen_b4_t512.log",
+      "success": true,
+      "config": {
+        "model": "Qwen/Qwen2.5-0.5B-Instruct",
+        "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+        "TOY_FLASH_ATTN_USE": "bf16",
+        "attention_backend": "CUSTOM",
+        "kv_cache_dtype arg": "bfloat16",
+        "batch_size": "4",
+        "max_tokens": "512",
+        "cache_config.cache_dtype": "bfloat16",
+        "model_config.dtype": "torch.bfloat16",
+        "resolved kv torch dtype": "torch.bfloat16"
+      },
+      "input_toks_per_s": 2.85,
+      "output_toks_per_s": 168.67,
+      "wall_time_s": 2.99,
+      "finish_reasons": [],
+      "prompt_count": 4,
+      "generated_count": 4,
+      "error": null,
+      "output_toks_per_s_per_request": 42.1675
     }
   ]
 }

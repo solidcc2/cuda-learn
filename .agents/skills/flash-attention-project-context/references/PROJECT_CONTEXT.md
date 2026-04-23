@@ -20,8 +20,8 @@ It is a navigation map, not a source of truth. Before giving conclusions or maki
 
 | Field | Value |
 | --- | --- |
-| last_verified_commit | `7f27dbaed7d2947bd14232088261211c607fbec4` |
-| refresh_scope | Incremental refresh for v5 CUDA dispatch and benchmark workflow support. |
+| last_verified_commit | `541a77f073e7b8ed5bf84c1a620a076f7e6fa8b9` |
+| refresh_scope | Incremental refresh for v5 CUDA dispatch, baseline benchmark support, and benchmark suite workflow. |
 
 When current `git rev-parse HEAD` differs from `last_verified_commit`, refresh this map before relying on it.
 
@@ -39,6 +39,7 @@ Refresh mode:
 | v5 CUDA kernel | WMMA/Tensor Core toy CUDA kernel | `flash_attention_backend/toy_flash_attn/v5/flash_attn_func.cu`, `flash_attention_backend/toy_flash_attn/v5/helper.h` |
 | v3 CUDA kernel | Older CUDA implementation | `flash_attention_backend/toy_flash_attn/flash_attn_func_v3.cu` |
 | vLLM smoke runner | End-to-end generation entrypoint | `flash_attention_backend/test_self_flash_attn_backend.py` |
+| CuTe torch extension demo | Minimal PyTorch JIT extension example for learning CuTe tensor/layout/tile concepts | `flash_attention_backend/test/test_cute_torch_extension.py`, `flash_attention_backend/test/cute_bias_add_kernel.cu` |
 | benchmark analysis | Shell orchestration, log parser, JSON output | `flash_attention_backend/analysis/run_perf_eval.sh`, `flash_attention_backend/analysis/parse_perf_eval_logs.py` |
 | performance report | Human-facing benchmark report | `flash_attention_backend/docs/PERFORMANCE_EVAL.md` |
 | performance report skill | Report-update workflow | `.agents/skills/flash-attention-performance-report/SKILL.md` |
@@ -141,7 +142,7 @@ Report workflow files:
 
 When changing benchmark cases or output fields, check:
 
-- default cases in `run_perf_eval.sh`;
+- default cases and named suites in `run_perf_eval.sh`;
 - case filename convention expected by `parse_perf_eval_logs.py`;
 - JSON fields consumed by performance report;
 - report tables and summary math.
@@ -151,6 +152,7 @@ Important report rule:
 - Do not copy absolute paths from JSON into the report.
 - If logs are stale or contain shell/runtime errors, do not treat parsed rows as valid performance data.
 - Keep performance report updates version-extensible: derive the in-scope version set from current benchmark cases, JSON, logs, and source semantics instead of preserving stale report rows.
+- Standard performance reports should not include debug-on/debug-off overhead tables unless explicitly requested.
 
 ## Quick Verification Patterns
 

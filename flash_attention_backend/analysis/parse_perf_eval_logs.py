@@ -17,6 +17,7 @@ SPEED_RE = re.compile(
 WALL_TIME_RE = re.compile(r"\b([0-9.]+)s/it\b")
 KEY_VALUE_RE = re.compile(r"^(model|revision|TOY_FLASH_ATTN_USE|attention_backend|kv_cache_dtype arg|batch_size|max_tokens|cache_config\.cache_dtype|model_config\.dtype|resolved kv torch dtype)\s*=\s*(.*)$")
 FINISH_RE = re.compile(r"finish_reason\s*[=:]\s*([A-Za-z0-9_ -]+)")
+ABS_PATH_RE = re.compile(r"(?<![\w.~-])/(?:[^\s:'\",]+/?)+")
 
 
 def _run_text(cmd: list[str], cwd: Path | None = None) -> str | None:
@@ -29,6 +30,21 @@ def _run_text(cmd: list[str], cwd: Path | None = None) -> str | None:
         ).strip()
     except Exception:
         return None
+
+
+def _repo_relative(path: Path, repo_root: Path) -> str:
+    try:
+        return str(path.resolve().relative_to(repo_root.resolve()))
+    except ValueError:
+        return path.name
+
+
+def _sanitize_text(text: str, repo_root: Path) -> str:
+    repo_root_text = str(repo_root.resolve())
+    text = text.replace(repo_root_text, ".")
+    home = str(Path.home())
+    text = text.replace(home, "<home>")
+    return ABS_PATH_RE.sub("<abs-path>", text)
 
 
 def _environment(repo_root: Path) -> dict[str, Any]:
@@ -114,35 +130,37 @@ def _finish_reasons(text: str) -> list[str]:
     return reasons
 
 
-def _error_summary(text: str) -> str | None:
+def _error_summary(text: str, repo_root: Path) -> str | None:
     markers = [
         "Traceback (most recent call last):",
         "EngineCore encountered a fatal error.",
         "CUDA error:",
         "RuntimeError:",
         "Error:",
+        "env:",
+        "command not found",
+        "No such file or directory",
     ]
     lines = text.splitlines()
     for idx, line in enumerate(lines):
         if any(marker in line for marker in markers):
-            return "\n".join(lines[idx : min(len(lines), idx + 12)])
+            return _sanitize_text("\n".join(lines[idx : min(len(lines), idx + 12)]), repo_root)
     return None
 
 
-def _parse_log(path: Path, log_root: Path) -> dict[str, Any]:
+def _parse_log(path: Path, log_root: Path, repo_root: Path) -> dict[str, Any]:
     text = path.read_text(errors="replace")
     case = _case_from_name(path)
     values = _config_values(text)
     input_speed, output_speed = _last_speed(text)
     wall_time_s = _last_wall_time_s(text)
     batch = case.get("batch")
+    error = _error_summary(text, repo_root)
 
     result: dict[str, Any] = {
         **case,
-        "log_path": str(path.relative_to(log_root.parent)),
-        "success": "Traceback (most recent call last):" not in text
-        and "EngineCore encountered a fatal error." not in text
-        and "CUDA error:" not in text,
+        "log_path": _repo_relative(path, repo_root),
+        "success": error is None,
         "config": values,
         "input_toks_per_s": input_speed,
         "output_toks_per_s": output_speed,
@@ -150,7 +168,7 @@ def _parse_log(path: Path, log_root: Path) -> dict[str, Any]:
         "finish_reasons": _finish_reasons(text),
         "prompt_count": len(re.findall(r"^Prompt\s+[0-9]+:", text, flags=re.MULTILINE)),
         "generated_count": len(re.findall(r"^Generated:", text, flags=re.MULTILINE)),
-        "error": _error_summary(text),
+        "error": error,
     }
     if output_speed is not None and isinstance(batch, int) and batch > 0:
         result["output_toks_per_s_per_request"] = output_speed / batch
@@ -174,8 +192,8 @@ def main() -> None:
     logs = sorted(log_dir.glob("*.log"))
     payload = {
         "environment": _environment(repo_root),
-        "log_dir": str(log_dir),
-        "benchmarks": [_parse_log(path, log_dir) for path in logs],
+        "log_dir": _repo_relative(log_dir, repo_root),
+        "benchmarks": [_parse_log(path, log_dir, repo_root) for path in logs],
     }
 
     output.parent.mkdir(parents=True, exist_ok=True)

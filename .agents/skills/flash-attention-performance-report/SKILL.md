@@ -9,7 +9,7 @@ Use this skill when the task is to update `flash_attention_backend/docs/PERFORMA
 
 ## Core Rules
 
-- Keep report information orthogonal: separate scope, environment, feature boundary, correctness, end-to-end performance, version analysis, debug overhead, and conclusion.
+- Keep report information orthogonal: separate scope, environment, feature boundary, correctness, end-to-end performance, version analysis, and conclusion.
 - Do not write absolute filesystem paths into the report.
 - Do not include private local paths such as home directories, cache directories, virtualenv paths, or machine-specific source roots.
 - Prefer repo-relative paths when a path is necessary.
@@ -32,6 +32,8 @@ Run benchmark cases from the repository root or by using repo-relative paths:
 
 ```bash
 bash flash_attention_backend/analysis/run_perf_eval.sh v4:qwen:1:128 official:qwen:1:128
+bash flash_attention_backend/analysis/run_perf_eval.sh smoke
+bash flash_attention_backend/analysis/run_perf_eval.sh report
 ```
 
 Case format:
@@ -39,6 +41,8 @@ Case format:
 ```text
 version:model:batch:max_tokens
 ```
+
+Named suites such as `smoke`, `report`, and `stress` may be supported by the current script. Inspect `run_perf_eval.sh` before documenting suite semantics or assuming default coverage.
 
 Supported versions are defined by `run_perf_eval.sh`. Before documenting backend semantics, inspect the current script and `test_self_flash_attn_backend.py`; do not assume old environment-variable behavior.
 
@@ -89,6 +93,7 @@ When filling `PERFORMANCE_EVAL.md`:
 - Performance section should contain only measured benchmark numbers.
 - Version analysis should explain current observed behavior by discovered version.
 - Keep comparison tables shape-compatible with the discovered case set. Add or remove rows/columns based on current measured cases instead of preserving stale version-specific rows.
+- Do not add a debug-on/debug-off overhead section to the standard report unless the user explicitly asks for debug overhead analysis.
 - Conclusion should be short and derived directly from filled tables.
 
 Use explicit labels:
