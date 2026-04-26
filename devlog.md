@@ -15,7 +15,8 @@
 
 ## Dev Log
 ### 20260426
-复用V5版本的layout, 完成cute::Tensor分配，完成Q chunk smem载入。
+1. 复用V5版本的layout, 完成cute::Tensor分配，完成Q chunk smem载入。
+2. 完成K & V的smem载入，线程一维化改造，完成chunk级别的block table预取。
 
 ### 20260424
 学习理解cute主要原语和范式，理解swizzle能力和bank conflict规避原理

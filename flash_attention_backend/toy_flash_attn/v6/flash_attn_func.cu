@@ -14,6 +14,7 @@
 #include "cute/numeric/integral_constant.hpp"
 #include "cute/numeric/numeric_types.hpp"
 #include "cute/pointer.hpp"
+#include "cute/pointer_flagged.hpp"
 #include "cute/stride.hpp"
 #include "cute/tensor_impl.hpp"
 #include "helper.h"
@@ -149,9 +150,6 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x, block_
     }
     __device__ inline int64_t kv_head_id() const {
         return q_head_id() / q_per_kv_group;
-    }
-    __device__ inline int64_t head_id() const {
-        return q_head_id();
     }
     __device__ inline int64_t q_seqlen() const {
         const int64_t bid = batch_id();
@@ -289,6 +287,10 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x, block_
         layout.last_chunk_sum = reinterpret_cast<inner_scalar_t*>(smem + offset);
         offset += (Q_CHUNK_SIZE * 1) * sizeof(inner_scalar_t);
 
+        offset = round_up(offset, alignof(int32_t));
+        layout.cache_block_table = reinterpret_cast<int32_t*>(smem + offset);
+        offset += (KV_CHUNK_SIZE / param.block_size) + 1;
+
         offset = round_up(offset, alignof(inner_scalar_t));
         layout._size = offset;
         return layout;
@@ -394,6 +396,8 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x, block_
     inner_scalar_t* last_chunk_max;
     inner_scalar_t* last_chunk_sum;
 
+    int32_t* cache_block_table;
+
 private:
     __device__ __host__ TileLayout(const ParamSet& p):param(p) {}
 
@@ -448,7 +452,8 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
     int64_t batch_id = blockIdx.x;
     int64_t head_id = blockIdx.z;
     int64_t q_chunk_id = blockIdx.y;
-
+    const int64_t kv_chunk_begin = kv_seq_begin / KV_CHUNK_SIZE;
+    const int64_t kv_chunk_end = (kv_seq_end + KV_CHUNK_SIZE - 1) / KV_CHUNK_SIZE;
 
     D3_const_G_Tensor gTensor_Q = cute::make_tensor(
         cute::make_gmem_ptr(param.q),
@@ -507,11 +512,10 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
         cute::make_stride(cute::Int<head_dim_stride>{}, cute::Int<1>{})
     );
 
-    const int64_t kv_chunk_begin = kv_seq_begin / KV_CHUNK_SIZE;
-    const int64_t kv_chunk_end = (kv_seq_end + KV_CHUNK_SIZE - 1) / KV_CHUNK_SIZE;
+
     {   // load q chunk         
         auto gQ_chunk = cute::local_tile(
-            gTensor_Q_batch(cute::_, param.head_id(), cute::_),   // 取当前head得到一个2维 tile
+            gTensor_Q_batch(cute::_, param.kv_head_id(), cute::_),   // 取当前head得到一个2维 tile
             cute::shape(sTensor_q),
             cute::make_coord(param.q_chunk_id(), cute::Int<0>{})
         );
@@ -528,27 +532,49 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
 
     for(int64_t kv_chunk_id = kv_chunk_end - 1;
             kv_chunk_id >= kv_chunk_begin; kv_chunk_id--) {
+
+        // for kv chunk do 
+        //     k tile load
+        //     chunk softmax
+        //     v tile load
+        //     out chunk merge
+        
+        // k tile载入不能直接做，依赖物理地址 & 虚拟地址转换
         {   // kv_seq_id 作用域 for k tile load
             toy_flash_attn_assert(head_dim_stride % block_x == 0);
 
-            constexpr int x_group = head_dim_stride / block_x;
-            constexpr int y_group = KV_CHUNK_SIZE / block_y;
-            int64_t base_x = threadIdx.x * x_group;
-            int64_t base_y = threadIdx.y * y_group;
-            #pragma unroll 
-            for(int64_t lane_x = 0; lane_x < x_group; ++lane_x) {
-                int64_t head_pos = base_x + lane_x;
-                
-                #pragma unroll
-                for(int64_t lane_y = 0; lane_y < y_group; ++lane_y) {
-                    int64_t kv_seq_off = base_y + lane_y;
-                    int64_t kv_seq_id = kv_chunk_id * KV_CHUNK_SIZE + kv_seq_off;
-                    bool valid_k = kv_seq_id < param.kv_seqlen() && 
-                        head_pos < param.head_dim;
-                    layout.k_at(kv_seq_off, head_pos) = valid_k ?
-                        param.k_at(kv_seq_id, head_pos) : scalar_t(0);
-                }
+            // 构建block table chunk 缓存
+            auto virt_seq_begin = kv_chunk_id * KV_CHUNK_SIZE;
+            auto virt_seq_end = min((kv_chunk_id+1)*KV_CHUNK_SIZE, param.kv_seqlen());
+            auto virt_block_begin = virt_seq_begin / param.block_size;    // TODO: block_size需要模板化
+            auto virt_block_end = (virt_seq_end + param.block_size - 1) / param.block_size;
+            for(int linear = threadIdx.x; virt_block_begin + linear < virt_block_end; linear += blockDim.x) {
+                layout.cache_block_table[linear] = param.block_table[
+                    param.bt_stride[0] * param.batch_id() +
+                    param.bt_stride[1] * (virt_block_begin + linear)
+                ];
             }
+            __syncthreads();
+
+            for(int linear = threadIdx.x; linear < cute::size(sTensor_k); linear += blockDim.x) {
+                auto coord = cute::idx2crd(linear, cute::shape(sTensor_k));
+                auto [seq_off, head_off] = coord;
+                auto kv_seq_id = virt_seq_begin + seq_off;
+                bool valid = kv_seq_id < param.kv_seqlen() && head_off < param.head_dim;
+                if (valid) {
+                    auto virt_block_id = kv_seq_id / param.block_size;
+                    auto block_off = kv_seq_id % param.block_size;
+
+                    auto phy_block_id = 
+                        layout.cache_block_table[virt_block_id - virt_block_begin];
+                    sTensor_k(coord) = gTensor_K(phy_block_id, block_off, param.kv_head_id(), head_off);
+                    sTensor_v(coord) = gTensor_V(phy_block_id, block_off, param.kv_head_id(), head_off);
+                } else {
+                    sTensor_k(coord) = scalar_t{0};// v也一起提前载入，减少一次寻址
+                    sTensor_v(coord) = scalar_t{0};
+                }  
+            }
+            __syncthreads();
         }
         __syncthreads();
         {   // QK matmul use mma
