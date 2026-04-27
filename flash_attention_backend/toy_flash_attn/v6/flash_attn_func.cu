@@ -10,6 +10,10 @@
 #include <mma.h>
 #include <cuda_bf16.h>
 
+#include "cute/algorithm/fill.hpp"
+#include "cute/arch/mma_sm80.hpp"
+#include "cute/atom/mma_atom.hpp"
+#include "cute/container/array_subbyte.hpp"
 #include "cute/layout.hpp"
 #include "cute/numeric/integral_constant.hpp"
 #include "cute/numeric/numeric_types.hpp"
@@ -19,25 +23,26 @@
 #include "cute/tensor_impl.hpp"
 #include "helper.h"
 
-template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int block_x, int block_y>
+template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int block_x>
 struct FlashAttnTrait;
 
-template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int block_x, int block_y>
+template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int block_x>
 __global__ void kernel_wrapper(
-    typename FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x, block_y>::ParamSet param) {
-    FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x, block_y>::kernel(param);
+    typename FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x>::ParamSet param) {
+    FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x>::kernel(param);
 }
 
 // grid(batch_id, q_token_chunk_id, head_id)
-template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int block_x, int block_y>
+template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int block_x>
 struct FlashAttnTrait {
+    // 使用 16x8x16算子
     static constexpr int32_t MMA_Q_CHUNK_SIZE = 16;
-    static constexpr int32_t MMA_K_CHUNK_SIZE = 16;
+    static constexpr int32_t MMA_K_CHUNK_SIZE = 8;
     static constexpr int32_t MMA_HEAD_CHUNK_SIZE = 16;
 
     static constexpr int32_t Q_CHUNK_SIZE = MMA_Q_CHUNK_SIZE;
     static constexpr int32_t WARP_SIZE = 32;
-    static constexpr int32_t KV_CHUNK_SIZE = MMA_K_CHUNK_SIZE * (block_x * block_y / WARP_SIZE); 
+    static constexpr int32_t KV_CHUNK_SIZE = MMA_K_CHUNK_SIZE * block_x / WARP_SIZE; 
 
     using D3_const_G_Tensor = decltype(cute::make_tensor(
         cute::make_gmem_ptr((const scalar_t*)0),
@@ -107,8 +112,8 @@ struct FlashAttnTrait {
 };
 
 // grid(batch_id, q_token_chunk_id, q_head_id)
-template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int block_x, int block_y>
-struct FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x, block_y>::ParamSet {
+template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int block_x>
+struct FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x>::ParamSet {
     const scalar_t* q;    // total_q x num_q_heads x head_dim
     const scalar_t* k;    // num_blocks x block_size x num_kv_heads x head_dim
     const scalar_t* v;
@@ -212,16 +217,14 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x, block_
         ];
     }
 };
-template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int block_x, int block_y>
-struct FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x, block_y>::TileLayout {
+template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int block_x>
+struct FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x>::TileLayout {
     static __device__ inline TileLayout builder(char* smem, const ParamSet& param) {
         TileLayout layout = layout_init(smem, param);
         toy_flash_attn_assert(smem != nullptr);
         constexpr int64_t x_group = head_dim_stride / block_x;    // 每个x线程处理的数量 
 
-
-
-
+        // TODO
         bool valid_thread = threadIdx.y < Q_CHUNK_SIZE;
         if (valid_thread) {
             int64_t base = threadIdx.x * x_group;
@@ -405,24 +408,20 @@ private:
 
     const ParamSet& param;
 };
-template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int block_x, int block_y>
-__device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x, block_y>::kernel(ParamSet& param) {
+template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int block_x>
+__device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x>::kernel(ParamSet& param) {
     extern __shared__ char smem[];
     TileLayout layout = TileLayout::builder(smem, param);
 
-    toy_flash_attn_assert(blockDim.y == block_y);
     toy_flash_attn_assert(blockDim.x == block_x);
-
-    toy_flash_attn_assert(Q_CHUNK_SIZE == block_y);
-    toy_flash_attn_assert(Q_CHUNK_SIZE * block_x % warpSize == 0);
+    toy_flash_attn_assert(Q_CHUNK_SIZE % MMA_Q_CHUNK_SIZE == 0);
+    toy_flash_attn_assert(kV_CHUNK_SIZE % MMA_KV_CHUNK_SIZE == 0);
 
     toy_flash_attn_assert(KV_CHUNK_SIZE % block_x == 0);
     toy_flash_attn_assert((block_x & (block_x - 1)) == 0);  // 2 的幂
 
     toy_flash_attn_assert(head_dim_stride % block_x == 0);
     toy_flash_attn_assert(head_dim_stride==round_up(param.head_dim, MMA_HEAD_CHUNK_SIZE));
-    toy_flash_attn_assert(block_x <= head_dim_stride);
-    toy_flash_attn_assert(block_x <= KV_CHUNK_SIZE);
     toy_flash_attn_assert(KV_CHUNK_SIZE >= head_dim_stride);
 
 
@@ -511,6 +510,11 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
         cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<head_dim_stride>{}),
         cute::make_stride(cute::Int<head_dim_stride>{}, cute::Int<1>{})
     );
+    auto sTensor_score = cute::make_tensor(
+        cute::make_smem_ptr(layout.score_reduction),
+        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
+        cute::make_stride(cute::Int<KV_CHUNK_SIZE>{}, cute::_1{})
+    );
 
 
     {   // load q chunk         
@@ -576,78 +580,81 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
             }
             __syncthreads();
         }
-        __syncthreads();
         {   // QK matmul use mma
             // q_chunk， k_chunk, head_dim_chunk
-            nvcuda::wmma::fragment<
-                nvcuda::wmma::matrix_a, 
-                MMA_Q_CHUNK_SIZE, MMA_K_CHUNK_SIZE, MMA_HEAD_CHUNK_SIZE,    
-                typename WmmaElement<scalar_t>::type, 
-                nvcuda::wmma::row_major
-            > frag_q;
-            nvcuda::wmma::fragment<
-                nvcuda::wmma::matrix_b, 
-                MMA_Q_CHUNK_SIZE, MMA_K_CHUNK_SIZE, MMA_HEAD_CHUNK_SIZE,   
-                typename WmmaElement<scalar_t>::type, 
-                nvcuda::wmma::col_major
-            > frag_k;
-            nvcuda::wmma::fragment<
-                nvcuda::wmma::accumulator, 
-                MMA_Q_CHUNK_SIZE, MMA_K_CHUNK_SIZE, MMA_HEAD_CHUNK_SIZE,   
-                float   // 考虑换成 inner_scalar_t?
-            > frag_acc;
-            nvcuda::wmma::fill_fragment(frag_acc, 0.0f);
-
-            int64_t tid = threadIdx.y * block_x + threadIdx.x;
-            toy_flash_attn_assert(block_x * block_y % warpSize == 0);
-            int64_t warp_group_id = tid / warpSize;     // warp 做kv方向并行， warp内做head dim循环
-            int64_t k_base = warp_group_id * MMA_K_CHUNK_SIZE;
-            toy_flash_attn_assert(k_base < KV_CHUNK_SIZE);
-            constexpr int64_t round = head_dim_stride / MMA_HEAD_CHUNK_SIZE;
-            #pragma unroll
-            for(int head_chunk_id=0; head_chunk_id<round; head_chunk_id++) {
-                int64_t head_base = head_chunk_id * MMA_HEAD_CHUNK_SIZE;
-                auto* q_tile = WmmaElement<scalar_t>::ptr(&layout.q_at(0, head_base));
-                auto* k_tile = WmmaElement<scalar_t>::ptr(&layout.k_at(k_base, head_base));
-                nvcuda::wmma::load_matrix_sync(frag_q, q_tile, head_dim_stride);
-                nvcuda::wmma::load_matrix_sync(frag_k, k_tile, head_dim_stride);
-                nvcuda::wmma::mma_sync(frag_acc, frag_q, frag_k, frag_acc);
+            // 
+            auto mma = cute::make_tiled_mma(
+                cute::MMA_Atom<cute::SM80_16x8x16_F32BF16BF16F32_TN>{},
+                cute::Layout<cute::Shape<cute::_1, cute::Int<KV_CHUNK_SIZE/MMA_K_CHUNK_SIZE>, cute::_1>>{}  // M N K K方向循环，N方向warp处理，M固定单warp
+            );
+            auto thr_mma = mma.get_thread_slice(threadIdx.x);
+            auto tCsAcc = thr_mma.partition_C(sTensor_score);
+            auto tCrAcc = cute::make_fragment_like(tCsAcc);
+            cute::clear(tCrAcc);
+            for(int i=0; i<head_dim_stride / MMA_HEAD_CHUNK_SIZE; i++){
+                auto q_chunk = cute::local_tile(sTensor_q,
+                    cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<MMA_HEAD_CHUNK_SIZE>{}),
+                    cute::make_coord(cute::_0{}, i)
+                );
+                auto k_chunk = cute::local_tile(sTensor_k,
+                    cute::make_shape(cute::Int<KV_CHUNK_SIZE>{}, cute::Int<MMA_HEAD_CHUNK_SIZE>{}),
+                    cute::make_coord(cute::_0{}, i)
+                );
+                auto tCsQ = thr_mma.partition_A(q_chunk);
+                auto tCsK = thr_mma.partition_B(k_chunk);
+                auto tCrQ = cute::make_fragment_like(tCsQ);
+                auto tCrK = cute::make_fragment_like(tCsK);
+                cute::copy(tCsQ, tCrQ);
+                cute::copy(tCsK, tCrK);
+                cute::gemm(thr_mma, tCrQ, tCrK, tCrAcc);
             }
-            auto* score_tile = WmmaElement<inner_scalar_t>::ptr(&layout.score_reduction_at(0, k_base));
-            nvcuda::wmma::store_matrix_sync(score_tile, frag_acc, KV_CHUNK_SIZE, nvcuda::wmma::mem_row_major);
-            
+            cute::copy(tCrAcc, tCsAcc);
             __syncthreads();
-            constexpr int64_t x_group = KV_CHUNK_SIZE / block_x;
-            #pragma unroll
-            for(int64_t lane = 0; lane < x_group; lane++) {
-                int64_t kv_seq_off = threadIdx.x * x_group + lane;
-                int64_t kv_seq_id = kv_chunk_id * KV_CHUNK_SIZE + kv_seq_off;
-                bool valid_score = param.q_token_id() < param.q_seqlen() &&  
-                    layout.is_valid_kv(param.q_token_id(), kv_seq_id, q_kv_offset, kv_win);
+            // 结合窗口，过滤掉无效部分
+            for(int linear = threadIdx.x; linear < cute::size(sTensor_score); linear += block_x) {
+                auto coord = cute::idx2crd(linear, cute::shape(sTensor_score));
+                auto [q_off, kv_off] = coord;
+                auto q_token_id = Q_CHUNK_SIZE * param.q_chunk_id() + q_off;
+                auto kv_seq_id = KV_CHUNK_SIZE * kv_chunk_id + kv_off;
+                bool valid_score = q_token_id < param.q_seqlen() &&
+                    layout.is_valid_kv(q_token_id, kv_seq_id, q_kv_offset, kv_win);
                 if (!valid_score) {
-                    layout.score_reduction_at(threadIdx.y, kv_seq_off) = inner_scalar_t(-INFINITY);
+                    sTensor_score(coord) = inner_scalar_t{-INFINITY};
                 }
             }
             __syncthreads();
         }
         {   // online softmax
-            constexpr int64_t x_group = KV_CHUNK_SIZE / block_x;
-            int64_t base_x = threadIdx.x * x_group;
-            {   // init max sum tile
-                #pragma unroll
-                for(int64_t lane_x = 0; lane_x < x_group; lane_x++) {
-                    int64_t seq_off = base_x + lane_x;
-                    layout.max_reduction_at(threadIdx.y, seq_off) = 
-                        layout.score_reduction_at(threadIdx.y, seq_off);
-                    layout.sum_reduction_at(threadIdx.y, seq_off) = 
-                        layout.score_reduction_at(threadIdx.y, seq_off) != inner_scalar_t(-INFINITY) ?
-                                inner_scalar_t(1.0) : inner_scalar_t(0.0);
-                }
+            auto sTensor_max_reduction = cute::make_tensor(
+                cute::make_smem_ptr(layout.max_reduction),
+                cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
+                cute::make_stride(cute::Int<KV_CHUNK_SIZE>{}, cute::_1{})
+            );
+            auto sTensor_sum_reduction = cute::make_tensor(
+                cute::make_smem_ptr(layout.sum_reduction),
+                cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
+                cute::make_stride(cute::Int<KV_CHUNK_SIZE>{}, cute::_1{})
+            );
+            for(int linear = threadIdx.x; linear < cute::size(sTensor_max_reduction); linear+=block_x) {
+                auto coord = cute::idx2crd(linear, cute::shape(sTensor_max_reduction));
+                sTensor_max_reduction(coord) = sTensor_score(coord);
+                sTensor_sum_reduction(coord) = 
+                    sTensor_score(coord) == inner_scalar_t{-INFINITY}?
+                        inner_scalar_t{0} : inner_scalar_t{1};
             }
             __syncthreads();
 
-            inner_scalar_t max_ = inner_scalar_t(-INFINITY);
-            inner_scalar_t sum_ = inner_scalar_t(0);
+
+            inner_scalar_t max_ = inner_scalar_t{-INFINITY};
+            inner_scalar_t sum_ = inner_scalar_t{0};
+            toy_flash_attn_assert(block_x >= KV_CHUNK_SIZE);
+            constexpr int thread_chunk = round_up(KV_CHUNK_SIZE, WARP_SIZE);
+            constexpr int warp_chunk_num = round_up(KV_CHUNK_SIZE, WARP_SIZE) / WARP_SIZE * Q_CHUNK_SIZE;
+            warp_chunk_num / (block_x / WARP_SIZE)
+
+
+            inner_scalar_t max_ = inner_scalar_t{-INFINITY};
+            inner_scalar_t sum_ = inner_scalar_t{0};
             int64_t q_off = threadIdx.y;
             #pragma unroll
             for(int64_t lane_x=0; lane_x <x_group; lane_x++) {  // group 归约
@@ -902,8 +909,8 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
         }
     }
 }
-template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int block_x, int block_y>
-void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x, block_y>::check_inputs(
+template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int block_x>
+void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x>::check_inputs(
     torch::Tensor q,
     torch::Tensor k,
     torch::Tensor v,
@@ -923,8 +930,8 @@ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x, block_y>
         "GQA requires num_q_heads to be divisible by num_kv_heads");
 } 
 
-template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int block_x, int block_y>
-torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x, block_y>::flash_attn_varlen_with_block(
+template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int block_x>
+torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x>::flash_attn_varlen_with_block(
     torch::Tensor q,
     torch::Tensor k,
     torch::Tensor v,
@@ -983,7 +990,7 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x,
         .block_size = block_size,
         .causal = causal,
     };
-    kernel_wrapper<scalar_t, inner_scalar_t, head_dim_stride, block_x, block_y><<<grid, block, TileLayout::size(param)>>>(param);
+    kernel_wrapper<scalar_t, inner_scalar_t, head_dim_stride, block_x><<<grid, block, TileLayout::size(param)>>>(param);
 
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;
