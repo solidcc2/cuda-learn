@@ -14,8 +14,12 @@
 8. 浮点0乘法，可能会因为无关数值，引入正负0,如果为了严格数值对拍和稳定性，最好不要依赖数值计算带来的路径选择，包括+/-inf, +/-0
 
 ## Dev Log
+### 20260428
+1. 完成online softmax求chunk max & sum用cute 1D线程的改写，同时改变原本的按行先block归约，再block归约的结构，改为2阶段warp归约。
+
 ### 20260427
-1. 完成softmax前置初始化步骤的 1D改造，softmax部分，暂时卡在1D warp归约逻辑。
+1. 完成QK的cute gemm乘法得到score
+2. 完成softmax前置初始化步骤的 1D改造，softmax部分，暂时卡在1D warp归约逻辑。
 
 ### 20260426
 1. 复用V5版本的layout, 完成cute::Tensor分配，完成Q chunk smem载入。

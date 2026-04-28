@@ -271,12 +271,12 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x>::TileL
         offset += (Q_CHUNK_SIZE * KV_CHUNK_SIZE) * sizeof(inner_scalar_t);
 
         offset = round_up(offset, alignof(inner_scalar_t));
-        layout.max_reduction = reinterpret_cast<inner_scalar_t*>(smem + offset);
-        offset += (Q_CHUNK_SIZE * KV_CHUNK_SIZE) * sizeof(inner_scalar_t);
+        layout.warp_max = reinterpret_cast<inner_scalar_t*>(smem + offset);
+        offset += (Q_CHUNK_SIZE * KV_CHUNK_SIZE / WARP_SIZE) * sizeof(inner_scalar_t);
 
         offset = round_up(offset, alignof(inner_scalar_t));
-        layout.sum_reduction = reinterpret_cast<inner_scalar_t*>(smem + offset);
-        offset += (Q_CHUNK_SIZE * KV_CHUNK_SIZE) * sizeof(inner_scalar_t);
+        layout.warp_sum = reinterpret_cast<inner_scalar_t*>(smem + offset);
+        offset += (Q_CHUNK_SIZE * KV_CHUNK_SIZE / WARP_SIZE) * sizeof(inner_scalar_t);
         
         offset = round_up(offset, alignof(scalar_t));
         layout.softmax_reduction = reinterpret_cast<scalar_t*>(smem + offset);
@@ -339,16 +339,6 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x>::TileL
         toy_flash_attn_assert(seq_off >= 0 && seq_off < KV_CHUNK_SIZE);
         return score_reduction[KV_CHUNK_SIZE * token_off + seq_off];
     }
-    __device__ inline inner_scalar_t& max_reduction_at(int64_t token_off, int64_t seq_off) {
-        toy_flash_attn_assert(token_off >= 0 && token_off < Q_CHUNK_SIZE);
-        toy_flash_attn_assert(seq_off >= 0 && seq_off < KV_CHUNK_SIZE);
-        return max_reduction[KV_CHUNK_SIZE * token_off + seq_off];
-    }
-    __device__ inline inner_scalar_t& sum_reduction_at(int64_t token_off, int64_t seq_off) {
-        toy_flash_attn_assert(token_off >= 0 && token_off < Q_CHUNK_SIZE);
-        toy_flash_attn_assert(seq_off >= 0 && seq_off < KV_CHUNK_SIZE);
-        return sum_reduction[KV_CHUNK_SIZE * token_off + seq_off];
-    }
     __device__ inline scalar_t& softmax_reduction_at(int64_t token_off, int64_t seq_off) {
         toy_flash_attn_assert(token_off >= 0 && token_off < Q_CHUNK_SIZE);
         toy_flash_attn_assert(seq_off >= 0 && seq_off < KV_CHUNK_SIZE);
@@ -393,8 +383,10 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_x>::TileL
 
     // inner for softmax
     inner_scalar_t* score_reduction;
-    inner_scalar_t* max_reduction;
-    inner_scalar_t* sum_reduction;
+    // inner_scalar_t* max_reduction;
+    // inner_scalar_t* sum_reduction;
+    inner_scalar_t* warp_sum;
+    inner_scalar_t* warp_max;
     scalar_t* softmax_reduction;  // 理论上可以和score_reduction复用，但是性能差别不大，这部分shared占用不是瓶颈，先分开使逻辑清晰
     inner_scalar_t* last_chunk_max;
     inner_scalar_t* last_chunk_sum;
@@ -625,142 +617,178 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
             __syncthreads();
         }
         {   // online softmax
-            auto sTensor_max_reduction = cute::make_tensor(
-                cute::make_smem_ptr(layout.max_reduction),
-                cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
-                cute::make_stride(cute::Int<KV_CHUNK_SIZE>{}, cute::_1{})
+            auto sTensor_warp_max = cute::make_tensor(
+                cute::make_smem_ptr(layout.warp_max),
+                cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE/WARP_SIZE>{}),
+                cute::make_stride(cute::Int<KV_CHUNK_SIZE/WARP_SIZE>{}, cute::_1{})
             );
-            auto sTensor_sum_reduction = cute::make_tensor(
-                cute::make_smem_ptr(layout.sum_reduction),
-                cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
-                cute::make_stride(cute::Int<KV_CHUNK_SIZE>{}, cute::_1{})
+            auto sTensor_warp_sum = cute::make_tensor(
+                cute::make_smem_ptr(layout.warp_sum),
+                cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE/WARP_SIZE>{}),
+                cute::make_stride(cute::Int<KV_CHUNK_SIZE/WARP_SIZE>{}, cute::_1{})
             );
-            for(int linear = threadIdx.x; linear < cute::size(sTensor_max_reduction); linear+=block_x) {
-                auto coord = cute::idx2crd(linear, cute::shape(sTensor_max_reduction));
-                sTensor_max_reduction(coord) = sTensor_score(coord);
-                sTensor_sum_reduction(coord) = 
-                    sTensor_score(coord) == inner_scalar_t{-INFINITY}?
-                        inner_scalar_t{0} : inner_scalar_t{1};
-            }
             __syncthreads();
 
-
-            inner_scalar_t max_ = inner_scalar_t{-INFINITY};
-            inner_scalar_t sum_ = inner_scalar_t{0};
+            // 先warp归约求chunk max & sum
             toy_flash_attn_assert(block_x >= KV_CHUNK_SIZE);
-            constexpr int thread_chunk = round_up(KV_CHUNK_SIZE, WARP_SIZE);
-            constexpr int warp_chunk_num = round_up(KV_CHUNK_SIZE, WARP_SIZE) / WARP_SIZE * Q_CHUNK_SIZE;
-            warp_chunk_num / (block_x / WARP_SIZE)
-
-
-            inner_scalar_t max_ = inner_scalar_t{-INFINITY};
-            inner_scalar_t sum_ = inner_scalar_t{0};
-            int64_t q_off = threadIdx.y;
-            #pragma unroll
-            for(int64_t lane_x=0; lane_x <x_group; lane_x++) {  // group 归约
-                int64_t seq_off = base_x + lane_x;
-                inner_scalar_t max_lane = layout.max_reduction_at(q_off, seq_off);
-                inner_scalar_t sum_lane = layout.sum_reduction_at(q_off, seq_off);
-                inner_scalar_t max_merge = max(max_lane, max_);
-                sum_ = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_lane_old")) + 
-                                        sum_lane * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_lane, max_merge), "softmax_sum_reduction_lane_new")), 
-                                        "softmax_sum_reduction_lane");
+            toy_flash_attn_assert(block_x % WARP_SIZE == 0);
+            toy_flash_attn_assert(KV_CHUNK_SIZE % WARP_SIZE == 0);
+            constexpr int warp_chunk_num = KV_CHUNK_SIZE / WARP_SIZE * Q_CHUNK_SIZE;
+            for(int linear=threadIdx.x; linear<cute::size(sTensor_score); linear += block_x) {
+                auto coord = cute::idx2crd(linear, cute::shape(sTensor_score));
+                auto val = sTensor_score(coord);
+                auto max_ = val;
+                auto sum_ = val == inner_scalar_t{-INFINITY} ? inner_scalar_t{0} : inner_scalar_t{1};
+                auto max_neighbor = __shfl_down_sync(0xffffffff, max_, 16);
+                auto sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 16);
+                auto max_merge = max(max_, max_neighbor);
+                auto sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old")) + 
+                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                                        "softmax_sum_reduction_warp");
                 max_ = max_merge;
+                sum_ = sum_merge;
+                
+                max_neighbor = __shfl_down_sync(0xffffffff, max_, 8);
+                sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 8);
+                max_merge = max(max_, max_neighbor);
+                sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old")) + 
+                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                                        "softmax_sum_reduction_warp");
+                max_ = max_merge;
+                sum_ = sum_merge;
+                                    
+                max_neighbor = __shfl_down_sync(0xffffffff, max_, 4);
+                sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 4);
+                max_merge = max(max_, max_neighbor);
+                sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old")) + 
+                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                                        "softmax_sum_reduction_warp");
+                max_ = max_merge;
+                sum_ = sum_merge;
+
+                max_neighbor = __shfl_down_sync(0xffffffff, max_, 2);
+                sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 2);
+                max_merge = max(max_, max_neighbor);
+                sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old")) + 
+                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                                        "softmax_sum_reduction_warp");
+                max_ = max_merge;
+                sum_ = sum_merge;
+
+                max_neighbor = __shfl_down_sync(0xffffffff, max_, 1);
+                sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 1);
+                max_merge = max(max_, max_neighbor);
+                sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old")) + 
+                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                                        "softmax_sum_reduction_warp");
+                max_ = max_merge;
+                sum_ = sum_merge;
+                
+                int warp_off = linear % WARP_SIZE;
+                auto [q_off, seq_off] = coord;
+                auto warp_in_row = seq_off / WARP_SIZE;
+                if (warp_off == 0) {
+                    sTensor_warp_max(q_off, warp_in_row) = max_;
+                    sTensor_warp_sum(q_off, warp_in_row) = sum_;
+                }
             }
-            layout.max_reduction_at(q_off, base_x) = max_;
-            layout.sum_reduction_at(q_off, base_x) = sum_;
             __syncthreads();
 
-            // 这里大概率是不要warp归约的，但是也实现一下，后续可以改为断言
-            int32_t bound = block_x / 2;
-            #pragma unroll
-            for(; bound >= warpSize; bound /= 2) {  // block reduction
-                if (threadIdx.x < bound && threadIdx.y < Q_CHUNK_SIZE) {
-                    int64_t neighbor_base = (threadIdx.x + bound) * x_group;
-                    inner_scalar_t max_neighbor = layout.max_reduction_at(q_off, neighbor_base);
-                    inner_scalar_t sum_neighbor = layout.sum_reduction_at(q_off, neighbor_base);
-                    inner_scalar_t max_merge = max(max_, max_neighbor);
-                    inner_scalar_t sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_block_old")) + 
-                                            sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_block_new")), 
-                                            "softmax_sum_reduction_block");
+            constexpr auto subgroup = KV_CHUNK_SIZE / WARP_SIZE;
+            constexpr auto subroup_num = WARP_SIZE / subgroup;
+            uint32_t base_mask = 0xffffffff;
+            toy_flash_attn_assert((subgroup & (subgroup-1)) == 0);  // 2的幂，便于warp内分组
+            if constexpr (subgroup == 1) {
+                base_mask = 0x1;
+            } else if constexpr (subgroup == 2) {
+                base_mask = 0x3;
+            } else if constexpr (subgroup == 4) {
+                base_mask = 0xf;
+            } else if constexpr (subgroup == 8) {
+                base_mask = 0xff;
+            } else if constexpr (subgroup == 16) {
+                base_mask = 0xffff;
+            } else if constexpr (subgroup == 32) {
+                base_mask = 0xffffffff;
+            } else {
+                toy_flash_attn_assert(false);
+            }
+            // warp分组归约
+            for (int linear = threadIdx.x; linear < cute::size(sTensor_warp_max); linear += block_x) {
+                auto coord = cute::idx2crd(linear, cute::shape(sTensor_warp_max));
+                // auto warp_id = linear / WARP_SIZE;
+                auto warp_off = linear % WARP_SIZE;
+                auto group_id = warp_off / subgroup;
+                auto mask = base_mask << (group_id * subgroup);
+                auto max_ = sTensor_warp_max(coord);
+                auto sum_ = sTensor_warp_sum(coord);
+                auto max_neighbor = max_;
+                auto sum_neighbor = sum_;
+                auto max_merge = max_;
+                auto sum_merge = sum_;
+                switch (subgroup) {
+                case 32:
+                    max_neighbor = __shfl_down_sync(mask, max_, 16);
+                    sum_neighbor = __shfl_down_sync(mask, sum_, 16);
+                    max_merge = max(max_, max_neighbor);
+                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old2")) + 
+                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new2")), 
+                                        "softmax_sum_reduction_warp2");
                     max_ = max_merge;
                     sum_ = sum_merge;
-                    layout.max_reduction_at(q_off, base_x) = max_;
-                    layout.sum_reduction_at(q_off, base_x) = sum_;
-                }
-                __syncthreads();
-            }
-
-
-            if (threadIdx.x < warpSize) {
-                int32_t subgroup = block_x < warpSize ? block_x : warpSize;
-                inner_scalar_t max_neighbor;
-                inner_scalar_t sum_neighbor;
-                inner_scalar_t max_merge;
-                inner_scalar_t sum_merge;
-
-                switch(subgroup) {
-                    case 32:
-                        max_neighbor = __shfl_down_sync(0xffffffff, max_, 16, subgroup);
-                        sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 16, subgroup);
-                        max_merge = max(max_, max_neighbor);
-                        sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
-                                                    sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
-                                                    "softmax_sum_reduction_warp");
-                        max_ = max_merge;
-                        sum_ = sum_merge;
-                        [[fallthrough]];
-                    case 16:
-                        max_neighbor = __shfl_down_sync(0xffffffff, max_, 8, subgroup);
-                        sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 8, subgroup);
-                        max_merge = max(max_, max_neighbor);
-                        sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
-                                                    sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
-                                                    "softmax_sum_reduction_warp");
-                        max_ = max_merge;
-                        sum_ = sum_merge;
-                        [[fallthrough]];
-                    case 8:
-                        max_neighbor = __shfl_down_sync(0xffffffff, max_, 4, subgroup);
-                        sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 4, subgroup);
-                        max_merge = max(max_, max_neighbor);
-                        sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
-                                                    sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
-                                                    "softmax_sum_reduction_warp");
-                        max_ = max_merge;
-                        sum_ = sum_merge;
-                        [[fallthrough]];
-                    case 4:
-                        max_neighbor = __shfl_down_sync(0xffffffff, max_, 2, subgroup);
-                        sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 2, subgroup);
-                        max_merge = max(max_, max_neighbor);
-                        sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
-                                                    sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
-                                                    "softmax_sum_reduction_warp");
-                        max_ = max_merge;
-                        sum_ = sum_merge;
-                        [[fallthrough]];
-                    case 2:
-                        max_neighbor = __shfl_down_sync(0xffffffff, max_, 1, subgroup);
-                        sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 1, subgroup);
-                        max_merge = max(max_, max_neighbor);
-                        sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_, max_merge), "softmax_sum_reduction_warp_old")) + 
-                                                    sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
-                                                    "softmax_sum_reduction_warp");
-                        max_ = max_merge;
-                        sum_ = sum_merge;
-                        [[fallthrough]];
-                    case 1:
-                        break;
-                    default:
-                        toy_flash_attn_assert(false);
-                }
-
-                if (threadIdx.x == 0) {
-                    layout.max_reduction_at(q_off, 0) = max_;
-                    layout.sum_reduction_at(q_off, 0) = sum_;
+                    [[fallthrough]];
+                case 16:
+                    max_neighbor = __shfl_down_sync(mask, max_, 8);
+                    sum_neighbor = __shfl_down_sync(mask, sum_, 8);
+                    max_merge = max(max_, max_neighbor);
+                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old2")) + 
+                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new2")), 
+                                        "softmax_sum_reduction_warp2");
+                    max_ = max_merge;
+                    sum_ = sum_merge;
+                    [[fallthrough]];
+                case 8:
+                    max_neighbor = __shfl_down_sync(mask, max_, 4);
+                    sum_neighbor = __shfl_down_sync(mask, sum_, 4);
+                    max_merge = max(max_, max_neighbor);
+                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old2")) + 
+                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new2")), 
+                                        "softmax_sum_reduction_warp2");
+                    max_ = max_merge;
+                    sum_ = sum_merge;
+                    [[fallthrough]];
+                case 4:
+                    max_neighbor = __shfl_down_sync(mask, max_, 2);
+                    sum_neighbor = __shfl_down_sync(mask, sum_, 2);
+                    max_merge = max(max_, max_neighbor);
+                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old2")) + 
+                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new2")), 
+                                        "softmax_sum_reduction_warp2");
+                    max_ = max_merge;
+                    sum_ = sum_merge;
+                    [[fallthrough]];
+                case 2:
+                    max_neighbor = __shfl_down_sync(mask, max_, 1);
+                    sum_neighbor = __shfl_down_sync(mask, sum_, 1);
+                    max_merge = max(max_, max_neighbor);
+                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old2")) + 
+                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new2")), 
+                                        "softmax_sum_reduction_warp2");
+                    max_ = max_merge;
+                    sum_ = sum_merge;
+                    [[fallthrough]];
+                case 1:
+                    break;
+                default:
+                    toy_flash_attn_assert(false);
+                };
+                auto [q_off, col_off] = coord;
+                if(col_off == 0) {
+                    sTensor_warp_max(q_off, 0) = max_;
+                    sTensor_warp_sum(q_off, 0) = sum_;
                 }
             }
+
             __syncthreads();
 #ifdef DEBUG_FLASH_ATTN_TRACE
             if (debug_row && threadIdx.x == 0 && threadIdx.y < Q_CHUNK_SIZE) {
