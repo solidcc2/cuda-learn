@@ -14,6 +14,7 @@
 #include "cute/arch/mma_sm80.hpp"
 #include "cute/atom/mma_atom.hpp"
 #include "cute/container/array_subbyte.hpp"
+#include "cute/int_tuple.hpp"
 #include "cute/layout.hpp"
 #include "cute/numeric/integral_constant.hpp"
 #include "cute/numeric/numeric_types.hpp"
@@ -440,9 +441,6 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
         }
     }
 
-    int64_t batch_id = blockIdx.x;
-    int64_t head_id = blockIdx.z;
-    int64_t q_chunk_id = blockIdx.y;
     const int64_t kv_chunk_begin = kv_seq_begin / KV_CHUNK_SIZE;
     const int64_t kv_chunk_end = (kv_seq_end + KV_CHUNK_SIZE - 1) / KV_CHUNK_SIZE;
 
@@ -504,6 +502,21 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
     );
     auto sTensor_score = cute::make_tensor(
         cute::make_smem_ptr(layout.score_reduction),
+        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
+        cute::make_stride(cute::Int<KV_CHUNK_SIZE>{}, cute::_1{})
+    );
+    auto sTensor_warp_max = cute::make_tensor(
+        cute::make_smem_ptr(layout.warp_max),
+        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE/WARP_SIZE>{}),
+        cute::make_stride(cute::Int<KV_CHUNK_SIZE/WARP_SIZE>{}, cute::_1{})
+    );
+    auto sTensor_warp_sum = cute::make_tensor(
+        cute::make_smem_ptr(layout.warp_sum),
+        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE/WARP_SIZE>{}),
+        cute::make_stride(cute::Int<KV_CHUNK_SIZE/WARP_SIZE>{}, cute::_1{})
+    );
+    auto sTensor_softmax = cute::make_tensor(
+        cute::make_smem_ptr(layout.softmax_reduction),
         cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
         cute::make_stride(cute::Int<KV_CHUNK_SIZE>{}, cute::_1{})
     );
@@ -617,17 +630,6 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
             __syncthreads();
         }
         {   // online softmax
-            auto sTensor_warp_max = cute::make_tensor(
-                cute::make_smem_ptr(layout.warp_max),
-                cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE/WARP_SIZE>{}),
-                cute::make_stride(cute::Int<KV_CHUNK_SIZE/WARP_SIZE>{}, cute::_1{})
-            );
-            auto sTensor_warp_sum = cute::make_tensor(
-                cute::make_smem_ptr(layout.warp_sum),
-                cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE/WARP_SIZE>{}),
-                cute::make_stride(cute::Int<KV_CHUNK_SIZE/WARP_SIZE>{}, cute::_1{})
-            );
-            __syncthreads();
 
             // 先warp归约求chunk max & sum
             toy_flash_attn_assert(block_x >= KV_CHUNK_SIZE);
@@ -788,63 +790,24 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
                     sTensor_warp_sum(q_off, 0) = sum_;
                 }
             }
-
             __syncthreads();
-#ifdef DEBUG_FLASH_ATTN_TRACE
-            if (debug_row && threadIdx.x == 0 && threadIdx.y < Q_CHUNK_SIZE) {
-                printf(
-                    "chunk_softmax bid=%lld hid=%lld q=%lld chunk=%lld max=%f sum=%f\n",
-                    (long long)param.batch_id(),
-                    (long long)param.head_id(),
-                    (long long)param.q_token_id(),
-                    (long long)kv_chunk_id,
-                    (double)layout.max_reduction_at(threadIdx.y, 0),
-                    (double)layout.sum_reduction_at(threadIdx.y, 0)
-                );
-            }
-#endif
 
-            { // block 广播max, 回填softmax
-                int64_t q_off = threadIdx.y;
+            // block 广播max, 回填softmax
+            for (int linear = threadIdx.x; linear < cute::size(sTensor_score); linear += block_x) {
+                auto coord = cute::idx2crd(linear, cute::shape(sTensor_score));
+                auto [q_off, seq_off] = coord;
+                auto kv_seq_id = kv_chunk_id * KV_CHUNK_SIZE + seq_off;
+                auto q_token_id = param.q_chunk_id() * Q_CHUNK_SIZE + q_off;
 
-                inner_scalar_t max_ = layout.max_reduction_at(q_off, 0);
-                #pragma unroll
-                for(int64_t lane_x=0; lane_x < x_group; lane_x++) {
-                    int64_t seq_off = base_x + lane_x;
-                    int64_t kv_seq_id = kv_chunk_id * KV_CHUNK_SIZE + seq_off;
-                    bool valid_q_kv_pair =
-                        param.q_token_id() < param.q_seqlen() &&
-                        layout.is_valid_kv(param.q_token_id(), kv_seq_id, q_kv_offset, kv_win);
-                    inner_scalar_t score = layout.score_reduction_at(q_off, seq_off);
-                    inner_scalar_t softmax = valid_q_kv_pair
-                        ? exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(score, max_), "softmax_exp_sub"))
-                        : inner_scalar_t(0);
-                    layout.softmax_reduction_at(q_off, seq_off) = scalar_t(softmax);    // 量化为bf16, 准备参与下一步mma计算
-                }
-
+                auto max_ = sTensor_warp_max(q_off, 0);
+                bool is_valid = layout.is_valid_kv(q_token_id, kv_seq_id, q_kv_offset, kv_win);
+                auto score = sTensor_score(coord);
+                auto softmax = is_valid ? exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(score, max_), "softmax_exp_sub"))
+                    : inner_scalar_t(0);
+                sTensor_softmax(coord) = softmax;
             }
             __syncthreads();
         }
-        {   // load V
-            constexpr int64_t x_group = head_dim_stride / block_x;
-            constexpr int64_t y_group = KV_CHUNK_SIZE / block_y;
-            int64_t base_x = threadIdx.x * x_group;
-            int64_t base_y = threadIdx.y * y_group;
-            #pragma unroll
-            for(int lane_y=0; lane_y < y_group; lane_y++) {
-                int64_t kv_seq_off = base_y + lane_y;
-                int64_t kv_seq_id = kv_chunk_id * KV_CHUNK_SIZE + kv_seq_off;
-
-                #pragma unroll 
-                for(int lane_x=0; lane_x < x_group; lane_x++) {
-                    int64_t head_pos = base_x + lane_x;
-                    bool valid_v = kv_seq_id < param.kv_seqlen() && head_pos < param.head_dim;
-                    layout.v_t_at(head_pos, kv_seq_off) = 
-                        valid_v ? param.v_at(kv_seq_id, head_pos) : scalar_t(0);
-                }
-            }
-        }
-        __syncthreads();
 
         int64_t tid = threadIdx.y * block_x + threadIdx.x;
         int64_t warp_id = tid / warpSize;
