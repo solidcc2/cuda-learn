@@ -16,6 +16,7 @@
 ## Dev Log
 ### 20260429
 1. 完成online softmax写回，移除旧的2D V载入。
+2. 数值上还有错误，确认为out写回时的有效性判定和mma分块错误。其他错误待排查。
 
 ### 20260428
 1. 完成online softmax求chunk max & sum用cute 1D线程的改写，同时改变原本的按行先block归约，再block归约的结构，改为2阶段warp归约。
