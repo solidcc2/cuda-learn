@@ -128,59 +128,6 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread_block_si
     __device__ inline int64_t kv_seqlen() const {
         return static_cast<int64_t>(seqused_k[batch_id()]);
     }
-    
-    __device__ inline scalar_t q_at(int64_t q_token_id, int64_t head_pos) const {
-        toy_flash_attn_assert(q_token_id >= 0 && q_token_id < q_seqlen());
-        toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim);
-        return q[
-            q_stride[0] * (q_token_id + cu_seqlens_q[batch_id()]) + 
-            q_stride[1] * q_head_id() +
-            q_stride[2] * head_pos
-        ];
-    }
-    __device__ inline scalar_t& out_at(int64_t out_token_id, int64_t head_pos) const {
-        toy_flash_attn_assert(out_token_id >= 0 && out_token_id < q_seqlen());
-        toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim);
-        return out[
-            out_stride[0] * (out_token_id + cu_seqlens_q[batch_id()]) + 
-            out_stride[1] * q_head_id() +
-            out_stride[2] * head_pos
-        ];
-    }
-    __device__ inline scalar_t k_at(int64_t k_seq_id, int64_t head_pos) const {
-        toy_flash_attn_assert(k_seq_id >= 0 && k_seq_id < kv_seqlen());
-        toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim);
-        toy_flash_attn_assert(block_size > 0);
-        const int64_t virt_block_id = k_seq_id / block_size;
-        const int64_t block_off = k_seq_id % block_size;
-        const int32_t phy_block_id = block_table[
-            bt_stride[0] * batch_id() + 
-            bt_stride[1] * virt_block_id
-        ];
-        return k[
-            k_stride[0] * phy_block_id + 
-            k_stride[1] * block_off +
-            k_stride[2] * kv_head_id() +
-            k_stride[3] * head_pos
-        ];
-    }
-    __device__ inline scalar_t v_at(int64_t v_seq_id, int64_t head_pos) const {
-        toy_flash_attn_assert(v_seq_id >= 0 && v_seq_id < kv_seqlen());
-        toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim);
-        toy_flash_attn_assert(block_size > 0);
-        const int64_t virt_block_id = v_seq_id / block_size;
-        const int64_t block_off = v_seq_id % block_size;
-        const int32_t phy_block_id = block_table[
-            bt_stride[0] * batch_id() + 
-            bt_stride[1] * virt_block_id
-        ];
-        return v[
-            v_stride[0] * phy_block_id + 
-            v_stride[1] * block_off +
-            v_stride[2] * kv_head_id() +
-            v_stride[3] * head_pos
-        ];
-    }
 };
 template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int thread_block_size>
 struct FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread_block_size>::TileLayout {
@@ -277,57 +224,6 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread_block_si
         return layout._size;
     }
 
-    // 这组accessor有大量代码冗余，但是考虑清晰，且重复的非常明显，当前复杂度还不是集中在这里，不考虑过度抽象减少冗余
-    __device__ inline scalar_t& q_at(int64_t token_off, int64_t head_pos) {
-        toy_flash_attn_assert(token_off >= 0 && token_off < Q_CHUNK_SIZE);
-        toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim_stride);
-        return q[head_dim_stride * token_off + head_pos];
-    }
-    __device__ inline scalar_t& k_at(int64_t seq_off, int64_t head_pos) {
-        toy_flash_attn_assert(seq_off >= 0 && seq_off < KV_CHUNK_SIZE);
-        toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim_stride);
-        return k[head_dim_stride * seq_off + head_pos];
-    }
-
-    // v 提供转置读取接口，方便和softmax结果对齐，都是行对位相乘，列统一为kv_chunk_off, 内存布局更友好
-    __device__ inline scalar_t& v_t_at(int64_t head_pos, int64_t seq_off) {
-        toy_flash_attn_assert(seq_off >= 0 && seq_off < KV_CHUNK_SIZE);
-        toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim_stride);
-        return v[KV_CHUNK_SIZE * head_pos + seq_off];
-    }
-    __device__ inline inner_scalar_t& out_at(int64_t token_off, int64_t head_pos) {
-        toy_flash_attn_assert(token_off >= 0 && token_off < Q_CHUNK_SIZE);
-        toy_flash_attn_assert(head_pos >= 0 && head_pos < head_dim_stride);
-        return out[head_dim_stride * token_off + head_pos];
-    }
-
-    __device__ inline inner_scalar_t& out_reduction_at(int64_t token_off, int64_t head_pos) {
-        toy_flash_attn_assert(token_off >= 0 && token_off < Q_CHUNK_SIZE);
-        toy_flash_attn_assert(head_pos >= 0 && head_pos < param.head_dim);
-        return out_reduction[head_dim_stride * token_off + head_pos];
-    }
-
-    __device__ inline inner_scalar_t& score_reduction_at(int64_t token_off, int64_t seq_off) {
-        toy_flash_attn_assert(token_off >= 0 && token_off < Q_CHUNK_SIZE);
-        toy_flash_attn_assert(seq_off >= 0 && seq_off < KV_CHUNK_SIZE);
-        return score_reduction[KV_CHUNK_SIZE * token_off + seq_off];
-    }
-    __device__ inline scalar_t& softmax_reduction_at(int64_t token_off, int64_t seq_off) {
-        toy_flash_attn_assert(token_off >= 0 && token_off < Q_CHUNK_SIZE);
-        toy_flash_attn_assert(seq_off >= 0 && seq_off < KV_CHUNK_SIZE);
-        return softmax_reduction[KV_CHUNK_SIZE * token_off + seq_off];
-    }
-
-    __device__ inline inner_scalar_t& last_chunk_max_at(int64_t token_off) {
-        toy_flash_attn_assert(token_off >= 0 && token_off < Q_CHUNK_SIZE);
-        return last_chunk_max[token_off];
-    }
-
-    __device__ inline inner_scalar_t& last_chunk_sum_at(int64_t token_off) {
-        toy_flash_attn_assert(token_off >= 0 && token_off < Q_CHUNK_SIZE);
-        return last_chunk_sum[token_off];
-    }
-
     __device__ inline bool is_valid_kv(int64_t q_token_id, int64_t kv_seq_id, int64_t q_kv_offset, const int64_t* kv_win) {
         const int64_t kv_axis = q_token_id - q_kv_offset;
         const int64_t win[2] = {
@@ -335,16 +231,6 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread_block_si
             min(param.kv_seqlen()-1, kv_axis + kv_win[1]),
         };
         return kv_seq_id >= win[0] && kv_seq_id <= win[1];
-    }
-    __device__ inline  scalar_t q_in_tile(int64_t q_token_id, int64_t head_pos) {
-        toy_flash_attn_assert(q_token_id / Q_CHUNK_SIZE == blockIdx.y);
-        toy_flash_attn_assert(head_pos < param.head_dim);
-        return q_at(q_token_id % Q_CHUNK_SIZE, head_pos);
-    }
-    __device__ inline scalar_t k_in_tile(int64_t k_seq_id, int64_t chunk_id, int64_t head_pos) {
-        toy_flash_attn_assert(k_seq_id / KV_CHUNK_SIZE == chunk_id);
-        toy_flash_attn_assert(head_pos < param.head_dim);
-        return k_at(k_seq_id % KV_CHUNK_SIZE, head_pos);
     }
 
     scalar_t* q;
@@ -842,6 +728,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread
                             o_new * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_new, max_merge), "out_chunk_reduction_new_sub"))  
                         , "out_chunk_reduction");       // 去除sum除法，统一到最后
                 sTensor_out(coord) = o_merge;
+                toy_flash_attn_assert(thread_block_size >= head_dim_stride);
                 if (head_off == 0) {    // block_x总是横跨多个行，不会存在重复的问题？
                     sTensor_last_max(q_off) = max_merge;
                     sTensor_last_sum(q_off) = sum_merge;
