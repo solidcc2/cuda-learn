@@ -38,12 +38,12 @@ template<typename scalar_t, typename inner_scalar_t, int head_dim_stride, int bl
 struct FlashAttnTrait {
     // 使用 16x8x16算子
     static constexpr int32_t MMA_Q_CHUNK_SIZE = 16;
-    static constexpr int32_t MMA_K_CHUNK_SIZE = 8;
+    static constexpr int32_t MMA_KV_CHUNK_SIZE = 8;
     static constexpr int32_t MMA_HEAD_CHUNK_SIZE = 16;
 
     static constexpr int32_t Q_CHUNK_SIZE = MMA_Q_CHUNK_SIZE;
     static constexpr int32_t WARP_SIZE = 32;
-    static constexpr int32_t KV_CHUNK_SIZE = MMA_K_CHUNK_SIZE * block_x / WARP_SIZE; 
+    static constexpr int32_t KV_CHUNK_SIZE = MMA_KV_CHUNK_SIZE * block_x / WARP_SIZE; 
 
     using D3_const_G_Tensor = decltype(cute::make_tensor(
         cute::make_gmem_ptr((const scalar_t*)0),
@@ -605,7 +605,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
             // 
             auto mma = cute::make_tiled_mma(
                 cute::MMA_Atom<cute::SM80_16x8x16_F32BF16BF16F32_TN>{}, // 固定 MMA_Q_CHUNK_SIZE = Q_CHUNK_SIZE所以shape(0) = 1
-                cute::Layout<cute::Shape<cute::_1, cute::Int<KV_CHUNK_SIZE/MMA_K_CHUNK_SIZE>, cute::_1>>{}  // M N K K方向循环，N方向warp处理，M固定单warp
+                cute::Layout<cute::Shape<cute::_1, cute::Int<KV_CHUNK_SIZE/MMA_KV_CHUNK_SIZE>, cute::_1>>{}  // M N K K方向循环，N方向warp处理，M固定单warp
             );
             auto thr_mma = mma.get_thread_slice(threadIdx.x);
             auto tCsAcc = thr_mma.partition_C(sTensor_score);
@@ -835,13 +835,13 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
             auto tCr_out_reduction = cute::make_fragment_like(tCs_out_reduction);
             cute::clear(tCr_out_reduction);
 
-            for (int mma_kv_chunk_id=0; mma_kv_chunk_id < KV_CHUNK_SIZE / MMA_K_CHUNK_SIZE; mma_kv_chunk_id++) {
+            for (int mma_kv_chunk_id=0; mma_kv_chunk_id < KV_CHUNK_SIZE / MMA_KV_CHUNK_SIZE; mma_kv_chunk_id++) {
                 auto mma_softmax_chunk = cute::local_tile(sTensor_softmax, 
-                    cute::make_shape(Q_CHUNK_SIZE, MMA_K_CHUNK_SIZE),
+                    cute::make_shape(Q_CHUNK_SIZE, MMA_KV_CHUNK_SIZE),
                     cute::make_coord(cute::_0{}, mma_kv_chunk_id)
                 );
                 auto mma_v_chunk = cute::local_tile(sTensor_v_t,
-                    cute::make_shape(head_dim_stride, MMA_K_CHUNK_SIZE),
+                    cute::make_shape(head_dim_stride, MMA_KV_CHUNK_SIZE),
                     cute::make_coord(cute::_0{}, mma_kv_chunk_id)
                 );
                 auto tCs_softmax = thr_mma.partition_A(mma_softmax_chunk);
@@ -884,19 +884,15 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
             }
             __syncthreads();
         }
-    } 
-    {   // write back out
-        int64_t x_group = head_dim_stride / block_x;
-        int64_t base = threadIdx.x * x_group;
-        inner_scalar_t merge_sum = layout.last_chunk_sum_at(threadIdx.y);
-        #pragma unroll
-        for(int64_t lane=0; lane < x_group; lane++) {
-            int64_t head_pos = base + lane;
-            bool valid_pos = param.q_token_id() < param.q_seqlen() && head_pos < param.head_dim;
-            inner_scalar_t val = layout.out_at(threadIdx.y, head_pos);
-            if (valid_pos) {
-                param.out_at(param.q_token_id(), head_pos) = scalar_t(softmax_div(val, merge_sum));
-            }
+    }
+    {
+        for(int linear = threadIdx.x; linear < cute::size(sTensor_out); linear += block_x) {
+            auto coord = cute::idx2crd(linear, cute::shape(sTensor_out));
+            auto [q_off, head_off] = coord;
+            auto q_token_id = param.q_chunk_id() * Q_CHUNK_SIZE + q_off;
+            auto o = sTensor_out(coord);
+            auto sum_ = sTensor_last_sum(q_off); 
+            gTensor_out_batch(q_token_id, head_off) = scalar_t(softmax_div(o, sum_)); 
         }
     }
 }
