@@ -490,10 +490,10 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
         cute::make_shape(cute::Int<KV_CHUNK_SIZE>{}, cute::Int<head_dim_stride>{}),
         cute::make_stride(cute::Int<head_dim_stride>{}, cute::Int<1>{})
     );
-    auto sTensor_v = cute::make_tensor(
+    auto sTensor_v_t = cute::make_tensor(
         cute::make_smem_ptr(layout.v),
-        cute::make_shape(cute::Int<KV_CHUNK_SIZE>{}, cute::Int<head_dim_stride>{}),
-        cute::make_stride(cute::Int<head_dim_stride>{}, cute::Int<1>{})
+        cute::make_shape(cute::Int<head_dim_stride>{}, cute::Int<KV_CHUNK_SIZE>{}),
+        cute::make_stride(cute::Int<KV_CHUNK_SIZE>{}, cute::Int<1>{})
     );
     auto sTensor_out = cute::make_tensor(
         cute::make_smem_ptr(layout.out),
@@ -519,6 +519,21 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
         cute::make_smem_ptr(layout.softmax_reduction),
         cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
         cute::make_stride(cute::Int<KV_CHUNK_SIZE>{}, cute::_1{})
+    );
+    auto sTensor_out_reduction = cute::make_tensor(
+        cute::make_smem_ptr(layout.out_reduction),
+        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<head_dim_stride>{}),
+        cute::make_stride(cute::Int<head_dim_stride>{}, cute::Int<1>{})
+    );
+    auto sTensor_last_max = cute::make_tensor(
+        cute::make_smem_ptr(layout.last_chunk_max),
+        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}),
+        cute::make_stride(cute::_1{})
+    );
+    auto sTensor_last_sum = cute::make_tensor(
+        cute::make_smem_ptr(layout.last_chunk_sum),
+        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}),
+        cute::make_stride(cute::_1{})
     );
 
 
@@ -577,10 +592,10 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
                     auto phy_block_id = 
                         layout.cache_block_table[virt_block_id - virt_block_begin];
                     sTensor_k(coord) = gTensor_K(phy_block_id, block_off, param.kv_head_id(), head_off);
-                    sTensor_v(coord) = gTensor_V(phy_block_id, block_off, param.kv_head_id(), head_off);
+                    sTensor_v_t(head_off, seq_off) = gTensor_V(phy_block_id, block_off, param.kv_head_id(), head_off);
                 } else {
-                    sTensor_k(coord) = scalar_t{0};// v也一起提前载入，减少一次寻址
-                    sTensor_v(coord) = scalar_t{0};
+                    sTensor_k(coord) = scalar_t{0};// v也一起提前载入，减少一次寻址, v转置载入，方便后面 P @ V
+                    sTensor_v_t(head_off, seq_off) = scalar_t{0}; 
                 }  
             }
             __syncthreads();
@@ -589,7 +604,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
             // q_chunk， k_chunk, head_dim_chunk
             // 
             auto mma = cute::make_tiled_mma(
-                cute::MMA_Atom<cute::SM80_16x8x16_F32BF16BF16F32_TN>{},
+                cute::MMA_Atom<cute::SM80_16x8x16_F32BF16BF16F32_TN>{}, // 固定 MMA_Q_CHUNK_SIZE = Q_CHUNK_SIZE所以shape(0) = 1
                 cute::Layout<cute::Shape<cute::_1, cute::Int<KV_CHUNK_SIZE/MMA_K_CHUNK_SIZE>, cute::_1>>{}  // M N K K方向循环，N方向warp处理，M固定单warp
             );
             auto thr_mma = mma.get_thread_slice(threadIdx.x);
@@ -809,81 +824,66 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
             __syncthreads();
         }
 
-        int64_t tid = threadIdx.y * block_x + threadIdx.x;
-        int64_t warp_id = tid / warpSize;
-        
-        nvcuda::wmma::fragment<
-            nvcuda::wmma::matrix_a, 
-            MMA_Q_CHUNK_SIZE, MMA_HEAD_CHUNK_SIZE, MMA_K_CHUNK_SIZE, 
-            typename WmmaElement<scalar_t>::type,
-            nvcuda::wmma::row_major
-        > frag_P;
-        nvcuda::wmma::fragment<
-            nvcuda::wmma::matrix_b, 
-            MMA_Q_CHUNK_SIZE, MMA_HEAD_CHUNK_SIZE, MMA_K_CHUNK_SIZE,
-            typename WmmaElement<scalar_t>::type,
-            nvcuda::wmma::col_major
-        > frag_V;
-        nvcuda::wmma::fragment<
-            nvcuda::wmma::accumulator, 
-            MMA_Q_CHUNK_SIZE, MMA_HEAD_CHUNK_SIZE, MMA_K_CHUNK_SIZE,
-            typename WmmaElement<inner_scalar_t>::type
-        > frag_out;
-        int64_t kv_chunk_round = KV_CHUNK_SIZE / MMA_K_CHUNK_SIZE;
-        int64_t head_off = warp_id * MMA_HEAD_CHUNK_SIZE;
+        {   // P @ V
+            auto mma = cute::make_tiled_mma(
+                cute::MMA_Atom<cute::SM80_16x8x16_F32BF16BF16F32_TN>{},
+                cute::Layout<cute::Shape<cute::_1, cute::Int<head_dim_stride/MMA_HEAD_CHUNK_SIZE>, cute::_1>>{}    // 依旧规定MMA_Q_CHUNK_SIZE = Q_CHUNK_SIZE
+            );
+            auto thr_mma = mma.get_thread_slice(threadIdx.x);
 
-        nvcuda::wmma::fill_fragment(frag_out, 0.0f);
-        // 设定有断言 block_x <= head_dim_stride
+            auto tCs_out_reduction = thr_mma.partition_C(sTensor_out_reduction);
+            auto tCr_out_reduction = cute::make_fragment_like(tCs_out_reduction);
+            cute::clear(tCr_out_reduction);
 
+            for (int mma_kv_chunk_id=0; mma_kv_chunk_id < KV_CHUNK_SIZE / MMA_K_CHUNK_SIZE; mma_kv_chunk_id++) {
+                auto mma_softmax_chunk = cute::local_tile(sTensor_softmax, 
+                    cute::make_shape(Q_CHUNK_SIZE, MMA_K_CHUNK_SIZE),
+                    cute::make_coord(cute::_0{}, mma_kv_chunk_id)
+                );
+                auto mma_v_chunk = cute::local_tile(sTensor_v_t,
+                    cute::make_shape(head_dim_stride, MMA_K_CHUNK_SIZE),
+                    cute::make_coord(cute::_0{}, mma_kv_chunk_id)
+                );
+                auto tCs_softmax = thr_mma.partition_A(mma_softmax_chunk);
+                auto tCs_V_T = thr_mma.partition_B(mma_v_chunk);
+                auto tCr_softmax = cute::make_fragment_like(tCs_softmax);
+                auto tCr_V_T = cute::make_fragment_like(tCs_V_T);
+                cute::copy(tCs_softmax, tCr_softmax);
+                cute::copy(tCs_V_T, tCr_V_T);
 
-        if (head_off < head_dim_stride) {
-            for(int round_id = 0; round_id < kv_chunk_round; round_id++) {
-                int64_t base_v_off = round_id * MMA_K_CHUNK_SIZE;
-                auto* tile_p = WmmaElement<scalar_t>::ptr(&layout.softmax_reduction_at(0, base_v_off));
-                auto* tile_v = WmmaElement<scalar_t>::ptr(&layout.v_t_at(head_off, base_v_off));
-                nvcuda::wmma::load_matrix_sync(frag_P, tile_p, KV_CHUNK_SIZE);
-                nvcuda::wmma::load_matrix_sync(frag_V, tile_v, KV_CHUNK_SIZE);
-                nvcuda::wmma::mma_sync(frag_out, frag_P, frag_V, frag_out);
+                cute::gemm(thr_mma, tCr_softmax, tCr_V_T, tCr_out_reduction);
             }
-            auto* tile_out_reduction = WmmaElement<inner_scalar_t>::ptr(&layout.out_reduction_at(0, head_off));
-            nvcuda::wmma::store_matrix_sync(tile_out_reduction, frag_out, head_dim_stride, nvcuda::wmma::mem_row_major);
+            cute::copy(tCr_out_reduction, tCs_out_reduction);
+            __syncthreads();
         }
-        __syncthreads();
-
         {   // out reduction
-            inner_scalar_t merge_m, merge_sum;
-            inner_scalar_t new_m = layout.max_reduction_at(threadIdx.y, 0);
-            inner_scalar_t new_sum = layout.sum_reduction_at(threadIdx.y, 0);
-            inner_scalar_t old_m = layout.last_chunk_max_at(threadIdx.y);
-            inner_scalar_t old_sum = layout.last_chunk_sum_at(threadIdx.y);
-
-            merge_m = max(old_m, new_m);
-            merge_sum = check_non_finite_val(
-                    old_sum * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(old_m, merge_m), "softmax_chunk_reduction_sum_old_sub")) + 
-                    new_sum * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(new_m, merge_m), "softmax_chunk_reduction_sum_new_sub"))
+            for(int linear = threadIdx.x; linear < cute::size(sTensor_out_reduction); linear += block_x) {
+                auto coord = cute::idx2crd(linear, cute::shape(sTensor_out_reduction));
+                auto [q_off, head_off] = coord;
+                auto max_new = sTensor_warp_max(q_off, 0);
+                auto sum_new = sTensor_warp_sum(q_off, 0);
+                auto max_old = sTensor_last_max(q_off);
+                auto sum_old = sTensor_last_sum(q_off);
+                auto max_merge = max(max_old, max_new);
+                auto sum_merge = check_non_finite_val(
+                    sum_old * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_old, max_merge), "softmax_chunk_reduction_sum_old_sub")) + 
+                    sum_new * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_new, max_merge), "softmax_chunk_reduction_sum_new_sub"))
                 , "softmax_chunk_reduction_sum");
-                
-            int64_t x_group = head_dim_stride / block_x;
-            int64_t base = threadIdx.x * x_group;
-            #pragma unroll
-            for(int64_t lane=0; lane < x_group; lane++) {
-                int64_t head_pos = base + lane;
-                if (head_pos < param.head_dim) {
-                    inner_scalar_t old_e = inner_scalar_t(layout.out_at(threadIdx.y, head_pos));
-                    inner_scalar_t new_e = inner_scalar_t(layout.out_reduction_at(threadIdx.y, head_pos));
-                    inner_scalar_t merge_e = check_non_finite_val(
-                            old_e * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(old_m, merge_m), "out_chunk_reduction_old_sub")) +
-                            new_e * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(new_m, merge_m), "out_chunk_reduction_new_sub"))  
+
+                auto o_old = sTensor_out(coord);
+                auto o_new = sTensor_out_reduction(coord);
+                auto o_merge = check_non_finite_val(
+                            o_old * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_old, max_merge), "out_chunk_reduction_old_sub")) +
+                            o_new * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_new, max_merge), "out_chunk_reduction_new_sub"))  
                         , "out_chunk_reduction");       // 去除sum除法，统一到最后
-                    layout.out_at(threadIdx.y, head_pos) = merge_e;
+                sTensor_out(coord) = o_merge;
+                if (head_off == 0) {    // block_x总是横跨多个行，不会存在重复的问题？
+                    sTensor_last_max(q_off) = max_merge;
+                    sTensor_last_sum(q_off) = sum_merge;
                 }
             }
-            if (threadIdx.x == 0) {
-                layout.last_chunk_max_at(threadIdx.y) = merge_m;
-                layout.last_chunk_sum_at(threadIdx.y) = merge_sum;
-            }
+            __syncthreads();
         }
-        __syncthreads();
     } 
     {   // write back out
         int64_t x_group = head_dim_stride / block_x;
