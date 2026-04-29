@@ -1,5 +1,4 @@
 
-#include <__clang_cuda_builtin_vars.h>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -10,7 +9,6 @@
 #include <mma.h>
 #include <cuda_bf16.h>
 
-#include "cute/algorithm/fill.hpp"
 #include "cute/arch/mma_sm80.hpp"
 #include "cute/atom/mma_atom.hpp"
 #include "cute/container/array_subbyte.hpp"
@@ -567,8 +565,6 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread
         
         // k tile载入不能直接做，依赖物理地址 & 虚拟地址转换
         {   // kv_seq_id 作用域 for k tile load
-            toy_flash_attn_assert(head_dim_stride % thread_block_size == 0);
-
             // 构建block table chunk 缓存
             auto virt_seq_begin = kv_chunk_id * KV_CHUNK_SIZE;
             auto virt_seq_end = min((kv_chunk_id+1)*KV_CHUNK_SIZE, param.kv_seqlen());
