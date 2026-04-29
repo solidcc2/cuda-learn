@@ -44,40 +44,6 @@ struct FlashAttnTrait {
     static constexpr int32_t WARP_SIZE = 32;
     static constexpr int32_t KV_CHUNK_SIZE = MMA_KV_CHUNK_SIZE * thread_block_size / WARP_SIZE; 
 
-    using D3_const_G_Tensor = decltype(cute::make_tensor(
-        cute::make_gmem_ptr((const scalar_t*)0),
-        cute::make_shape(int64_t{0}, int64_t{0}, int64_t{0}),
-        cute::make_stride(int64_t{0}, int64_t{0}, int64_t{0})
-    ));
-    using D4_const_G_Tensor = decltype(cute::make_tensor(
-        cute::make_gmem_ptr((const scalar_t*)0),
-        cute::make_shape(int64_t{0}, int64_t{0}, int64_t{0}, int64_t{0}),
-        cute::make_stride(int64_t{0}, int64_t{0}, int64_t{0}, int64_t{0})
-    ));
-
-
-    using D3_G_Tensor = decltype(cute::make_tensor(
-        cute::make_gmem_ptr((scalar_t*)0),
-        cute::make_shape(int64_t{0}, int64_t{0}, int64_t{0}),
-        cute::make_stride(int64_t{0}, int64_t{0}, int64_t{0})
-    ));
-    using D4_G_Tensor = decltype(cute::make_tensor(
-        cute::make_gmem_ptr((scalar_t*)0),
-        cute::make_shape(int64_t{0}, int64_t{0}, int64_t{0}, int64_t{0}),
-        cute::make_stride(int64_t{0}, int64_t{0}, int64_t{0}, int64_t{0})
-    ));
-
-    using D2_S_Tensor = decltype(cute::make_tensor(
-        cute::make_smem_ptr((scalar_t*)0),
-        cute::make_shape(int64_t{0}, int64_t{0}),
-        cute::make_stride(int64_t{0}, int64_t{0})
-    ));
-        using D2_inner_S_Tensor = decltype(cute::make_tensor(
-        cute::make_smem_ptr((inner_scalar_t*)0),
-        cute::make_shape(int64_t{0}, int64_t{0}),
-        cute::make_stride(int64_t{0}, int64_t{0})
-    ));
-
     struct ParamSet;
     struct TileLayout;
     static __device__ void kernel(ParamSet& param);
@@ -445,35 +411,35 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread
     const int64_t kv_chunk_begin = kv_seq_begin / KV_CHUNK_SIZE;
     const int64_t kv_chunk_end = (kv_seq_end + KV_CHUNK_SIZE - 1) / KV_CHUNK_SIZE;
 
-    D3_const_G_Tensor gTensor_Q = cute::make_tensor(
+    auto gTensor_Q = cute::make_tensor(
         cute::make_gmem_ptr(param.q),
         cute::make_shape(param.q_size[0], param.q_size[1], param.q_size[2]),
         cute::make_stride(param.q_stride[0], param.q_stride[1], param.q_stride[2])
     );
-    D3_G_Tensor gTensor_out = cute::make_tensor(
+    auto gTensor_out = cute::make_tensor(
         cute::make_gmem_ptr(param.out),
         cute::make_shape(param.out_size[0], param.out_size[1], param.out_size[2]),
         cute::make_stride(param.out_stride[0], param.out_stride[1], param.out_stride[2])
     );
-    D4_const_G_Tensor gTensor_K = cute::make_tensor(
+    auto gTensor_K = cute::make_tensor(
         cute::make_gmem_ptr(param.k),
         cute::make_shape(param.k_size[0], param.k_size[1], param.k_size[2], param.k_size[3]),
         cute::make_stride(param.k_stride[0], param.k_stride[1], param.k_stride[2], param.k_stride[3])
     );
-    D4_const_G_Tensor gTensor_V = cute::make_tensor(
+    auto gTensor_V = cute::make_tensor(
         cute::make_gmem_ptr(param.v),
         cute::make_shape(param.v_size[0], param.v_size[1], param.v_size[2], param.v_size[3]),
         cute::make_stride(param.v_stride[0], param.v_stride[1], param.v_stride[2], param.v_stride[3])
     );
     int64_t batch_q_len = param.cu_seqlens_q[param.batch_id()+1] - param.cu_seqlens_q[param.batch_id()];
-    D3_const_G_Tensor gTensor_Q_batch = cute::make_tensor(
+    auto gTensor_Q_batch = cute::make_tensor(
         cute::make_gmem_ptr(
             param.q + param.q_stride[0] * param.cu_seqlens_q[param.batch_id()]
         ),
         cute::make_shape(int64_t{batch_q_len}, param.q_size[1], param.q_size[2]),
         cute::make_stride(param.q_stride[0], param.q_stride[1], param.q_stride[2])
     );
-    D3_G_Tensor gTensor_out_batch = cute::make_tensor(
+    auto gTensor_out_batch = cute::make_tensor(
         cute::make_gmem_ptr(
             param.out + param.out_stride[0] * param.cu_seqlens_q[param.batch_id()]
         ),
@@ -889,9 +855,12 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread
             auto coord = cute::idx2crd(linear, cute::shape(sTensor_out));
             auto [q_off, head_off] = coord;
             auto q_token_id = param.q_chunk_id() * Q_CHUNK_SIZE + q_off;
-            auto o = sTensor_out(coord);
-            auto sum_ = sTensor_last_sum(q_off); 
-            gTensor_out_batch(q_token_id, param.q_head_id(), head_off) = scalar_t(softmax_div(o, sum_)); 
+            bool valid_pos = q_token_id < param.q_seqlen() && head_off < param.head_dim;
+            if (valid_pos) {
+                auto o = sTensor_out(coord);
+                auto sum_ = sTensor_last_sum(q_off); 
+                gTensor_out_batch(q_token_id, param.q_head_id(), head_off) = scalar_t(softmax_div(o, sum_)); 
+            }
         }
     }
 }
