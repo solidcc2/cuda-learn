@@ -835,11 +835,11 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread
 
             for (int mma_kv_chunk_id=0; mma_kv_chunk_id < KV_CHUNK_SIZE / MMA_KV_CHUNK_SIZE; mma_kv_chunk_id++) {
                 auto mma_softmax_chunk = cute::local_tile(sTensor_softmax, 
-                    cute::make_shape(Q_CHUNK_SIZE, MMA_KV_CHUNK_SIZE),
+                    cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<MMA_KV_CHUNK_SIZE>{}),
                     cute::make_coord(cute::_0{}, mma_kv_chunk_id)
                 );
                 auto mma_v_chunk = cute::local_tile(sTensor_v_t,
-                    cute::make_shape(head_dim_stride, MMA_KV_CHUNK_SIZE),
+                    cute::make_shape(cute::Int<head_dim_stride>{}, cute::Int<MMA_KV_CHUNK_SIZE>{}),
                     cute::make_coord(cute::_0{}, mma_kv_chunk_id)
                 );
                 auto tCs_softmax = thr_mma.partition_A(mma_softmax_chunk);
