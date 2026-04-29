@@ -8,6 +8,7 @@
 #include <cuda_bf16.h>
 #include <mma.h>
 #include <cuda_bf16.h>
+#include <torch/headeronly/util/BFloat16.h>
 
 #include "cute/arch/mma_sm80.hpp"
 #include "cute/atom/mma_atom.hpp"
@@ -986,6 +987,6 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread_b
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("flash_attn_varlen_with_block_v6_64", &FlashAttnTrait<cute::bfloat16_t, float, 64, 128>::flash_attn_varlen_with_block, "flash attn varlen with block");
+    m.def("flash_attn_varlen_with_block_v6_64", &FlashAttnTrait<at::BFloat16, float, 64, 128>::flash_attn_varlen_with_block, "flash attn varlen with block");
     // m.def("flash_attn_varlen_with_block_v5_128", &FlashAttnTrait<at::BFloat16, float, 128, 16, 16>::flash_attn_varlen_with_block, "flash attn varlen with block");
 }
