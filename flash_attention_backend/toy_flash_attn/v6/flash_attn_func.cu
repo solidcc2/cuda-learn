@@ -401,44 +401,21 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread
         //     chunk softmax
         //     v tile load
         //     out chunk merge
-        // {   // clear buffer
-        //     for(int linear = threadIdx.x; linear < cute::size(sTensor_out_reduction); linear += thread_block_size) {
-        //         auto coord = cute::idx2crd(linear, cute::shape(sTensor_out_reduction));
-        //         sTensor_out_reduction(coord) = inner_scalar_t{0};
-        //     }
-        //     for(int linear = threadIdx.x; linear < cute::size(sTensor_score); linear += thread_block_size) {
-        //         auto coord = cute::idx2crd(linear, cute::shape(sTensor_score));
-        //         sTensor_score(coord) = inner_scalar_t{-INFINITY};
-        //     }
-        //     for(int linear = threadIdx.x; linear < cute::size(sTensor_softmax); linear += thread_block_size) {
-        //         auto coord = cute::idx2crd(linear, cute::shape(sTensor_softmax));
-        //         sTensor_softmax(coord) = inner_scalar_t{0};
-        //     }
-        //     for(int linear = threadIdx.x; linear < cute::size(sTensor_warp_max); linear += thread_block_size) {
-        //         auto coord = cute::idx2crd(linear, cute::shape(sTensor_warp_max));
-        //         sTensor_warp_max(coord) = inner_scalar_t{-INFINITY};
-        //     }
-        //     for(int linear = threadIdx.x; linear < cute::size(sTensor_warp_sum); linear += thread_block_size) {
-        //         auto coord = cute::idx2crd(linear, cute::shape(sTensor_warp_sum));
-        //         sTensor_warp_sum(coord) = inner_scalar_t{0};
-        //     }
-        //     __syncthreads();
-        // }
 
         // k tile载入不能直接做，依赖物理地址 & 虚拟地址转换
         {   // kv_seq_id 作用域 for k tile load
             // 构建block table chunk 缓存
-            // auto virt_seq_begin = kv_chunk_id * KV_CHUNK_SIZE;
-            // auto virt_seq_end = min((kv_chunk_id+1)*KV_CHUNK_SIZE, param.kv_seqlen());
-            // auto virt_block_begin = virt_seq_begin / param.block_size;    // TODO: block_size需要模板化
-            // auto virt_block_end = (virt_seq_end + param.block_size - 1) / param.block_size;
-            // for(int linear = threadIdx.x; virt_block_begin + linear < virt_block_end; linear += blockDim.x) {
-            //     layout.cache_block_table[linear] = param.block_table[
-            //         param.bt_stride[0] * param.batch_id() +
-            //         param.bt_stride[1] * (virt_block_begin + linear)
-            //     ];
-            // }
-            // __syncthreads();
+            auto virt_seq_begin = kv_chunk_id * KV_CHUNK_SIZE;
+            auto virt_seq_end = min((kv_chunk_id+1)*KV_CHUNK_SIZE, param.kv_seqlen());
+            auto virt_block_begin = virt_seq_begin / param.block_size;    // TODO: block_size需要模板化
+            auto virt_block_end = (virt_seq_end + param.block_size - 1) / param.block_size;
+            for(int linear = threadIdx.x; virt_block_begin + linear < virt_block_end; linear += blockDim.x) {
+                layout.cache_block_table[linear] = param.block_table[
+                    param.bt_stride[0] * param.batch_id() +
+                    param.bt_stride[1] * (virt_block_begin + linear)
+                ];
+            }
+            __syncthreads();
 
             for(int linear = threadIdx.x; linear < cute::size(sTensor_k); linear += blockDim.x) {
                 auto coord = cute::idx2crd(linear, cute::shape(sTensor_k));
@@ -449,12 +426,12 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread
                     auto virt_block_id = kv_seq_id / param.block_size;
                     auto block_off = kv_seq_id % param.block_size;
 
-                    // auto phy_block_id = 
-                    //     layout.cache_block_table[virt_block_id - virt_block_begin];
-                    auto phy_block_id = param.block_table[
-                        param.bt_stride[0] * param.batch_id() +
-                        param.bt_stride[1] * virt_block_id
-                    ];
+                    auto phy_block_id = 
+                        layout.cache_block_table[virt_block_id - virt_block_begin];
+                    // auto phy_block_id = param.block_table[
+                    //     param.bt_stride[0] * param.batch_id() +
+                    //     param.bt_stride[1] * virt_block_id
+                    // ];
 
                     sTensor_k(coord) = gTensor_K(phy_block_id, block_off, param.kv_head_id(), head_off);
                     sTensor_v_t(head_off, seq_off) = gTensor_V(phy_block_id, block_off, param.kv_head_id(), head_off);
@@ -827,92 +804,6 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread
             }
             __syncthreads();
         }
-
-        // {   // out reduction: 2-stage, avoid race on last_chunk_max/sum
-
-        //     // =========================
-        //     // stage 1:
-        //     // update sTensor_out only.
-        //     // Do NOT write sTensor_last_max / sTensor_last_sum here.
-        //     // =========================
-        //     for (int linear = threadIdx.x;
-        //         linear < cute::size(sTensor_out_reduction);
-        //         linear += thread_block_size) {
-
-        //         auto coord = cute::idx2crd(linear, cute::shape(sTensor_out_reduction));
-        //         auto [q_off, head_off] = coord;
-
-        //         auto max_new = sTensor_warp_max(q_off, 0);
-        //         auto sum_new = sTensor_warp_sum(q_off, 0);
-
-        //         // old state: all head_off must see the same old value
-        //         auto max_old = sTensor_last_max(q_off);
-        //         auto sum_old = sTensor_last_sum(q_off);
-
-        //         auto max_merge = max(max_old, max_new);
-
-        //         auto alpha_old = exp2f(check_nan_val(
-        //             softmax_scale_log2 * softmax_sub(max_old, max_merge),
-        //             "out_chunk_reduction_old_sub"
-        //         ));
-
-        //         auto alpha_new = exp2f(check_nan_val(
-        //             softmax_scale_log2 * softmax_sub(max_new, max_merge),
-        //             "out_chunk_reduction_new_sub"
-        //         ));
-
-        //         auto o_old = sTensor_out(coord);
-        //         auto o_new = sTensor_out_reduction(coord);
-
-        //         auto o_merge = check_non_finite_val(
-        //             o_old * alpha_old + o_new * alpha_new,
-        //             "out_chunk_reduction"
-        //         );
-
-        //         sTensor_out(coord) = o_merge;
-        //     }
-
-        //     // 必须同步：确保所有 head_off 都已经读完 old last state
-        //     __syncthreads();
-
-        //     // =========================
-        //     // stage 2:
-        //     // update last_chunk_max/sum once per q_off.
-        //     // =========================
-        //     for (int q_off = threadIdx.x;
-        //         q_off < Q_CHUNK_SIZE;
-        //         q_off += thread_block_size) {
-
-        //         auto max_new = sTensor_warp_max(q_off, 0);
-        //         auto sum_new = sTensor_warp_sum(q_off, 0);
-
-        //         auto max_old = sTensor_last_max(q_off);
-        //         auto sum_old = sTensor_last_sum(q_off);
-
-        //         auto max_merge = max(max_old, max_new);
-
-        //         auto alpha_old = exp2f(check_nan_val(
-        //             softmax_scale_log2 * softmax_sub(max_old, max_merge),
-        //             "softmax_chunk_reduction_sum_old_sub"
-        //         ));
-
-        //         auto alpha_new = exp2f(check_nan_val(
-        //             softmax_scale_log2 * softmax_sub(max_new, max_merge),
-        //             "softmax_chunk_reduction_sum_new_sub"
-        //         ));
-
-        //         auto sum_merge = check_non_finite_val(
-        //             sum_old * alpha_old + sum_new * alpha_new,
-        //             "softmax_chunk_reduction_sum"
-        //         );
-
-        //         sTensor_last_max(q_off) = max_merge;
-        //         sTensor_last_sum(q_off) = sum_merge;
-        //     }
-
-        //     // 必须同步：确保下一轮 kv_chunk 看到更新后的 last state
-        //     __syncthreads();
-        // }
     }
     {
         for(int linear = threadIdx.x; linear < cute::size(sTensor_out); linear += thread_block_size) {
