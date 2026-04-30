@@ -17,10 +17,13 @@ SMOKE_CASES=(
   "v4:qwen:4:128"
   "v5:qwen:1:128"
   "v5:qwen:4:128"
+  "v6:qwen:1:128"
+  "v6:qwen:4:128"
   "official:qwen:1:128"
   "official:qwen:4:128"
   "v4:gpt2:1:128"
   "v5:gpt2:1:128"
+  "v6:gpt2:1:128"
   "official:gpt2:1:128"
 )
 
@@ -29,6 +32,8 @@ REPORT_CASES=(
   "v4:qwen:4:512"
   "v5:qwen:1:512"
   "v5:qwen:4:512"
+  "v6:qwen:1:512"
+  "v6:qwen:4:512"
   "official:qwen:1:512"
   "official:qwen:4:512"
 )
@@ -36,6 +41,7 @@ REPORT_CASES=(
 STRESS_CASES=(
   "v4:qwen:1:2048"
   "v5:qwen:1:2048"
+  "v6:qwen:1:2048"
   "official:qwen:1:2048"
 )
 
@@ -79,9 +85,9 @@ Case format:
   version:model:batch:max_tokens
 
 Suites:
-  smoke   -> short 128-token coverage, includes baseline/v4/v5/official
-  report  -> 512-token Qwen coverage for v4/v5/official
-  stress  -> 2048-token single-batch Qwen coverage for v4/v5/official
+  smoke   -> short 128-token coverage, includes baseline/v4/v5/v6/official
+  report  -> 512-token Qwen coverage for v4/v5/v6/official
+  stress  -> 2048-token single-batch Qwen coverage for v4/v5/v6/official
   all     -> smoke + report + stress
 
 Note:
@@ -94,6 +100,7 @@ Known versions:
   v4         -> TOY_FLASH_ATTN_USE=bf16, TOY_FLASH_ATTN_CUDA_VERSION=v4
   v4_fp32    -> TOY_FLASH_ATTN_USE=fp32, TOY_FLASH_ATTN_CUDA_VERSION=v4
   v5         -> TOY_FLASH_ATTN_USE=bf16, TOY_FLASH_ATTN_CUDA_VERSION=v5
+  v6         -> TOY_FLASH_ATTN_USE=bf16, TOY_FLASH_ATTN_CUDA_VERSION=v6
   official   -> TOY_FLASH_ATTN_USE=official
 
 Examples:
@@ -114,10 +121,15 @@ run_case() {
   local batch="$3"
   local max_tokens="$4"
   local log_path="${LOG_DIR}/${version}_${model}_b${batch}_t${max_tokens}.log"
+  local case_label="${version}:${model}:${batch}:${max_tokens}"
+  local started_at
+  local ended_at
+  local elapsed_s
 
   mkdir -p "${LOG_DIR}"
   echo "[RUN] version=${version} model=${model} batch=${batch} max_tokens=${max_tokens}"
   echo "[LOG] ${log_path}"
+  started_at=$(date +%s)
 
   local status=0
   case "${version}" in
@@ -156,6 +168,13 @@ run_case() {
         "${PYTHON_BIN}" "${RUNNER}" -m "${model}" -b "${batch}" -t "${max_tokens}" \
         >"${log_path}" 2>&1 || status=$?
       ;;
+    v6)
+      env \
+        TOY_FLASH_ATTN_USE=bf16 \
+        TOY_FLASH_ATTN_CUDA_VERSION=v6 \
+        "${PYTHON_BIN}" "${RUNNER}" -m "${model}" -b "${batch}" -t "${max_tokens}" \
+        >"${log_path}" 2>&1 || status=$?
+      ;;
     official)
       (
         unset TOY_FLASH_ATTN_CUDA_VERSION
@@ -169,6 +188,9 @@ run_case() {
       ;;
   esac
   sanitize_log "${log_path}"
+  ended_at=$(date +%s)
+  elapsed_s=$((ended_at - started_at))
+  echo "[DONE] case=${case_label} status=${status} elapsed=${elapsed_s}s"
   return "${status}"
 }
 
@@ -184,6 +206,9 @@ main() {
   fi
 
   local expanded_cases=()
+  local run_started_at
+  local run_ended_at
+  local total_elapsed_s
   for case_spec in "${cases[@]}"; do
     case "${case_spec}" in
       smoke)
@@ -204,6 +229,7 @@ main() {
     esac
   done
 
+  run_started_at=$(date +%s)
   local failed=0
   for case_spec in "${expanded_cases[@]}"; do
     IFS=":" read -r version model batch max_tokens extra <<<"${case_spec}"
@@ -217,6 +243,8 @@ main() {
       failed=1
     fi
   done
+  run_ended_at=$(date +%s)
+  total_elapsed_s=$((run_ended_at - run_started_at))
 
   "${PYTHON_BIN}" "${PARSER}" \
     --log-dir "${LOG_DIR}" \
@@ -224,6 +252,7 @@ main() {
     --repo-root "${REPO_ROOT}"
 
   echo "[JSON] ${OUT_JSON}"
+  echo "[SUMMARY] cases=${#expanded_cases[@]} failed=${failed} elapsed=${total_elapsed_s}s"
   return "${failed}"
 }
 

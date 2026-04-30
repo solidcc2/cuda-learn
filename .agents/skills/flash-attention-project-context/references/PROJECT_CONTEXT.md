@@ -20,8 +20,8 @@ It is a navigation map, not a source of truth. Before giving conclusions or maki
 
 | Field | Value |
 | --- | --- |
-| last_verified_commit | `541a77f073e7b8ed5bf84c1a620a076f7e6fa8b9` |
-| refresh_scope | Incremental refresh for v5 CUDA dispatch, baseline benchmark support, and benchmark suite workflow. |
+| last_verified_commit | `d08a36aad054a95fed380144b0111b49f07f68b9` |
+| refresh_scope | Incremental refresh for v6 benchmark integration, benchmark suite workflow, and current perf-report runtime state. |
 
 When current `git rev-parse HEAD` differs from `last_verified_commit`, refresh this map before relying on it.
 
@@ -37,6 +37,7 @@ Refresh mode:
 | toy attention package | Python wrapper, CUDA extension loading, reference implementation | `flash_attention_backend/toy_flash_attn/flash_attention_func.py` |
 | v4 CUDA kernel | Current toy CUDA kernel | `flash_attention_backend/toy_flash_attn/v4/flash_attn_func.cu`, `flash_attention_backend/toy_flash_attn/v4/helper.h` |
 | v5 CUDA kernel | WMMA/Tensor Core toy CUDA kernel | `flash_attention_backend/toy_flash_attn/v5/flash_attn_func.cu`, `flash_attention_backend/toy_flash_attn/v5/helper.h` |
+| v6 CUDA kernel | CuTe-based toy CUDA kernel | `flash_attention_backend/toy_flash_attn/v6/flash_attn_func.cu`, `flash_attention_backend/toy_flash_attn/v6/helper.h` |
 | v3 CUDA kernel | Older CUDA implementation | `flash_attention_backend/toy_flash_attn/flash_attn_func_v3.cu` |
 | vLLM smoke runner | End-to-end generation entrypoint | `flash_attention_backend/test_self_flash_attn_backend.py` |
 | CuTe torch extension demo | PyTorch JIT extension examples for learning CuTe tensor/layout/tile concepts plus a small SM80 MMA GEMM path | `flash_attention_backend/test/test_cute_torch_extension.py`, `flash_attention_backend/test/cute_bias_add_kernel.cu`, `flash_attention_backend/test/cute_mma_gemm_kernel.cu` |
@@ -51,7 +52,7 @@ Verify these in code before relying on them.
 | Variable | Current role | Primary files to check |
 | --- | --- | --- |
 | `TOY_FLASH_ATTN_USE` | Selects reference / bf16 / fp32 path in wrapper; selects official / custom backend in smoke runner; used by benchmark shell cases | `toy_flash_attn/flash_attention_func.py`, `test_self_flash_attn_backend.py`, `analysis/run_perf_eval.sh` |
-| `TOY_FLASH_ATTN_CUDA_VERSION` | Selects v3, v4, or v5 extension at import time | `toy_flash_attn/flash_attention_func.py`, `analysis/run_perf_eval.sh`, `toy_flash_attn/README.md` |
+| `TOY_FLASH_ATTN_CUDA_VERSION` | Selects v3, v4, v5, or v6 extension at import time | `toy_flash_attn/flash_attention_func.py`, `analysis/run_perf_eval.sh`, `toy_flash_attn/README.md` |
 | `TOY_FLASH_ATTN_DEBUG` | Prints wrapper input tensor metadata | `toy_flash_attn/flash_attention_func.py` |
 | `TOY_FLASH_ATTN_PRINT_DTYPE` | Prints Python reference dtype trace | `toy_flash_attn/flash_attention_func.py` |
 | `TOY_FLASH_ATTN_DUMP_DIR` | Dumps attention context for replay/debug | `toy_flash_attn/flash_attention_func.py`, `toy_flash_attn/README.md` |
@@ -81,7 +82,7 @@ Current facts to verify before use:
 
 ## CUDA Version Loading Dependency
 
-When changing v3/v4/v5 loading or op aliases, check:
+When changing v3/v4/v5/v6 loading or op aliases, check:
 
 - extension `load(...)` block in `toy_flash_attn/flash_attention_func.py`;
 - v3, v4, and v5 op names exported by CUDA bindings;
@@ -96,6 +97,7 @@ Current facts to verify before use:
 - v3 registers only bf16 alias and has no fp32 op alias;
 - v4 registers bf16 and fp32 op aliases.
 - v5 registers bf16 WMMA aliases for supported head-dim specializations; verify current exported op names before use.
+- v6 is loadable through the same wrapper path and is benchmark-selectable via `TOY_FLASH_ATTN_CUDA_VERSION=v6`; verify exported op names before documenting specialization coverage.
 
 ## v4 Kernel Dependency
 
@@ -153,6 +155,7 @@ Important report rule:
 - If logs are stale or contain shell/runtime errors, do not treat parsed rows as valid performance data.
 - Keep performance report updates version-extensible: derive the in-scope version set from current benchmark cases, JSON, logs, and source semantics instead of preserving stale report rows.
 - Standard performance reports should not include debug-on/debug-off overhead tables unless explicitly requested.
+- If `perf_eval_results.json` reports `cuda_available: false` or logs show platform/device bootstrap failures, record the run as invalid for performance comparison instead of carrying forward older throughput tables.
 
 ## Quick Verification Patterns
 

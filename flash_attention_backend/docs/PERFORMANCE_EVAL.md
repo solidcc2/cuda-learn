@@ -2,251 +2,223 @@
 
 ## 1. 评估范围
 
-本文档只评估 attention backend 的端到端可运行性、正确性和性能表现。
+本文档基于当前 benchmark 产物更新，只记录已验证的有效样本，不补推缺失结果。
 
-本次报告依据 `analysis/perf_eval_results.json` 和 `analysis/perf_logs/*.log` 更新。当前 benchmark 脚本支持的版本集合由 `analysis/run_perf_eval.sh` 定义，并提供 `smoke`、`report`、`stress` 分级套件。本次已重跑 `smoke report`，日志覆盖 `baseline`、`v4`、`v5` 和 `official`；未采集 `v3`、`v4_fp32` 和 `stress`。
+本次报告依据：
 
-当前纳入报告分析的实现版本：
+- `analysis/run_perf_eval.sh`
+- `analysis/perf_eval_results.json`
+- `analysis/perf_logs/*.log`
 
-| 版本 | 本次数据状态 | 含义 | 入口 |
-| --- | --- | --- | --- |
-| baseline | 已采集 | Python reference 实现 | `TOY_FLASH_ATTN_USE=reference` |
-| v4 | 已采集 | 当前 toy CUDA kernel | `TOY_FLASH_ATTN_USE=bf16`，`TOY_FLASH_ATTN_CUDA_VERSION=v4` |
-| v5 | 已采集 | WMMA / Tensor Core toy CUDA kernel | `TOY_FLASH_ATTN_USE=bf16`，`TOY_FLASH_ATTN_CUDA_VERSION=v5` |
-| official | 已采集 | vLLM 官方 FlashAttention backend | 见 `test_self_flash_attn_backend.py` 的 `_attention_config()` |
+当前 benchmark 脚本已纳入以下版本：
 
-当前不讨论后续优化计划，只记录已有实现的评估口径、结果和原因分析。
+| 版本 | 本次脚本状态 | 入口 |
+| --- | --- | --- |
+| baseline | 已纳入 | `TOY_FLASH_ATTN_USE=reference` |
+| v4 | 已纳入 | `TOY_FLASH_ATTN_USE=bf16`，`TOY_FLASH_ATTN_CUDA_VERSION=v4` |
+| v5 | 已纳入 | `TOY_FLASH_ATTN_USE=bf16`，`TOY_FLASH_ATTN_CUDA_VERSION=v5` |
+| v6 | 已纳入 | `TOY_FLASH_ATTN_USE=bf16`，`TOY_FLASH_ATTN_CUDA_VERSION=v6` |
+| official | 已纳入 | `TOY_FLASH_ATTN_USE=official` |
+
+当前套件定义：
+
+- `smoke`：128 token，覆盖 `baseline / v4 / v5 / v6 / official`
+- `report`：512 token，覆盖 `v4 / v5 / v6 / official`
+- `stress`：2048 token，覆盖 `v4 / v5 / v6 / official`
 
 ## 2. 测试环境
 
-环境信息来自 `perf_eval_results.json`。
+环境信息来自当前 `perf_eval_results.json`。
 
 | 项目 | 数值 |
 | --- | --- |
-| 数据生成时间 | 2026-04-23T01:41:36.816772+00:00 |
+| 数据生成时间 | 2026-04-30T10:45:50.501089+00:00 |
 | GPU | NVIDIA GeForce RTX 2050 |
-| CUDA | 12.8 |
-| PyTorch | 2.10.0+cu128 |
-| vLLM | 0.17.1 |
 | Python | 3.10.12 |
-| 测量 git commit | `541a77f073e7b8ed5bf84c1a620a076f7e6fa8b9` |
-| 模型 | GPT-2, Qwen2.5-0.5B-Instruct |
-| dtype | torch.bfloat16 |
-| kv_cache_dtype | baseline/v4/v5: bfloat16; official: auto，实际解析为 torch.bfloat16 |
-| max_model_len | 512 |
-| batch size | 1, 4 |
-| max tokens | 128, 512 |
+| PyTorch | 2.10.0+cu128 |
+| CUDA toolkit | 12.8 |
+| `torch.cuda.is_available()` | `true` |
+| vLLM | 0.17.1 |
+| 测量 git commit | `d08a36aad054a95fed380144b0111b49f07f68b9` |
 
 ## 3. 功能边界
 
-| 能力 | baseline | v4 | v5 | official |
-| --- | --- | --- | --- | --- |
-| paged KV cache | 支持 | 支持 | 支持 | 支持 |
-| varlen query | 支持 | 支持 | 支持 | 支持 |
-| causal mask | 支持 | 支持 | 支持 | 支持 |
-| sliding window | 支持 | 支持 | 支持 | 支持 |
-| GQA | 支持 | 支持 | 支持 | 支持 |
-| bf16 输入 | 支持 | 支持 | 支持 | 支持 |
-| fp32 accumulator | PyTorch 行为 | 支持 | 支持 | 官方实现内部策略 |
-| head_dim=64 | 支持 | 支持 | 支持 | 支持 |
-| Tensor Core / WMMA | 不适用 | 未使用 | 使用 | 官方实现内部策略 |
+| 能力 | baseline | v4 | v5 | v6 | official |
+| --- | --- | --- | --- | --- | --- |
+| paged KV cache | 支持 | 支持 | 支持 | 支持 | 支持 |
+| varlen query | 支持 | 支持 | 支持 | 支持 | 支持 |
+| causal mask | 支持 | 支持 | 支持 | 支持 | 支持 |
+| sliding window | 支持 | 支持 | 支持 | 支持 | 支持 |
+| GQA | 支持 | 支持 | 支持 | 支持 | 支持 |
+| bf16 输入 | 支持 | 支持 | 支持 | 支持 | 支持 |
+| fp32 accumulator | PyTorch 行为 | 支持 | 支持 | 支持 | 官方实现内部策略 |
+| head_dim=64 | 支持 | 支持 | 支持 | 支持 | 支持 |
+| Tensor Core / MMA | 不适用 | 未使用 | WMMA | CuTe MMA | 官方实现内部策略 |
 
-说明：本节描述当前源码能力边界，不等同于本次 benchmark 是否已有有效性能数据。
+说明：本节描述当前源码能力边界，不等同于本次 benchmark 已对所有版本和 case 采集到有效性能数据。
 
 ## 4. 正确性评估
 
-### 4.1 方法
+本次 JSON 仅包含端到端生成 benchmark，没有独立数值对拍字段。
 
-正确性评估只回答一个问题：当前实现的输出是否能在指定容差下对齐 reference。
+因此当前报告不填充：
 
-记录指标：
-
-| 指标 | 含义 |
-| --- | --- |
-| max abs diff | 最大绝对误差 |
-| mean abs diff | 平均绝对误差 |
-| p99 max diff | 多轮测试中 max diff 的 p99 |
-| pass rate | 指定阈值下的通过率 |
-
-### 4.2 结果
-
-本次 JSON 只包含端到端生成性能数据，没有包含 unittest 数值对拍数据。因此正确性结果不在本次报告中填充。
-
-| 版本 | case | q_heads | kv_heads | head_dim | causal | window | threshold | pass rate | max diff | mean diff |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| v4 | full attention | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 |
-| v4 | causal | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 |
-| v4 | GQA | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 |
-| v5 | full attention | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 |
-| v5 | causal | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 |
-| v5 | GQA | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 | 未采集 |
+- `max abs diff`
+- `mean abs diff`
+- `pass rate`
 
 ## 5. 端到端性能评估
 
-### 5.1 方法
+### 5.1 数据有效性口径
 
-端到端性能使用 `flash_attention_backend/test_self_flash_attn_backend.py` 运行。本次执行 `smoke report`：`smoke` 使用 128 token，`report` 使用 512 token；两者都保持 runner 中固定的 `max_model_len=512`。
+仅当同时满足以下条件时，样本才计入正式性能表：
 
-记录指标：
+- `success: true`
+- `input_toks_per_s` 与 `output_toks_per_s` 非空
+- `prompt_count == batch`
+- `generated_count == batch`
 
-| 指标 | 含义 |
+本次汇总：
+
+| 指标 | 数值 |
 | --- | --- |
-| input toks/s | prefill 吞吐 |
-| output toks/s | decode 吞吐 |
-| output toks/s/request | 多 batch 下的单请求平均 decode 吞吐 |
-| wall time | vLLM progress 中解析到的单步耗时 |
-| finish reason | 生成结束原因 |
+| benchmark case 总数 | 25 |
+| 有效样本数 | 25 |
+| 无效样本数 | 0 |
 
-### 5.2 数据有效性
+### 5.2 Case 状态总览
 
-| case 组 | 数量 | 判定 |
-| --- | --- | --- |
-| baseline qwen b1 t128 | 1 | 有效 |
-| GPT-2 b1 t128: v4/v5/official | 3 | 有效 |
-| Qwen b1/b4 t128: v4/v5/official | 6 | 有效 |
-| Qwen b1/b4 t512: v4/v5/official | 6 | 有效 |
+| 版本 | 模型 | batch | max_tokens | 状态 |
+| --- | --- | --- | --- | --- |
+| baseline | qwen | 1 | 128 | 已采集 |
+| v4 | gpt2 | 1 | 128 | 已采集 |
+| v4 | qwen | 1 | 128 | 已采集 |
+| v4 | qwen | 4 | 128 | 已采集 |
+| v4 | qwen | 1 | 512 | 已采集 |
+| v4 | qwen | 4 | 512 | 已采集 |
+| v4 | qwen | 1 | 2048 | 已采集 |
+| v5 | gpt2 | 1 | 128 | 已采集 |
+| v5 | qwen | 1 | 128 | 已采集 |
+| v5 | qwen | 4 | 128 | 已采集 |
+| v5 | qwen | 1 | 512 | 已采集 |
+| v5 | qwen | 4 | 512 | 已采集 |
+| v5 | qwen | 1 | 2048 | 已采集 |
+| v6 | gpt2 | 1 | 128 | 已采集 |
+| v6 | qwen | 1 | 128 | 已采集 |
+| v6 | qwen | 4 | 128 | 已采集 |
+| v6 | qwen | 1 | 512 | 已采集 |
+| v6 | qwen | 4 | 512 | 已采集 |
+| v6 | qwen | 1 | 2048 | 已采集 |
+| official | gpt2 | 1 | 128 | 已采集 |
+| official | qwen | 1 | 128 | 已采集 |
+| official | qwen | 4 | 128 | 已采集 |
+| official | qwen | 1 | 512 | 已采集 |
+| official | qwen | 4 | 512 | 已采集 |
+| official | qwen | 1 | 2048 | 已采集 |
 
-所有本次解析到的 benchmark 都满足 `success: true`，且有效性能行均包含 `input_toks_per_s` 和 `output_toks_per_s`。
+### 5.3 有效性能样本
 
-### 5.3 Smoke: 128 Token
-
-| 模型 | 版本 | batch | input toks/s | output toks/s | output toks/s/request | wall time | finish reason |
+| 模型 | 版本 | batch | max_tokens | input toks/s | output toks/s | output toks/s/request | wall time |
 | --- | --- | --- | --- | --- | --- | --- | --- |
-| Qwen2.5-0.5B-Instruct | baseline | 1 | 1.14 | 18.19 | 18.19 | 7.04s | 未采集 |
-| Qwen2.5-0.5B-Instruct | v4 | 1 | 1.53 | 24.50 | 24.50 | 5.23s | 未采集 |
-| Qwen2.5-0.5B-Instruct | v5 | 1 | 3.57 | 57.11 | 57.11 | 2.24s | 未采集 |
-| Qwen2.5-0.5B-Instruct | official | 1 | 5.31 | 84.91 | 84.91 | 1.51s | 未采集 |
-| Qwen2.5-0.5B-Instruct | v4 | 4 | 3.99 | 60.03 | 15.01 | 2.13s | 未采集 |
-| Qwen2.5-0.5B-Instruct | v5 | 4 | 13.52 | 203.63 | 50.91 | 2.51s | 未采集 |
-| Qwen2.5-0.5B-Instruct | official | 4 | 21.00 | 316.21 | 79.05 | 1.61s | 未采集 |
-| GPT-2 | v4 | 1 | 3.46 | 55.39 | 55.39 | 2.31s | 未采集 |
-| GPT-2 | v5 | 1 | 8.95 | 143.25 | 143.25 | 未采集 | 未采集 |
-| GPT-2 | official | 1 | 18.87 | 301.93 | 301.93 | 未采集 | 未采集 |
+| GPT-2 | official | 1 | 128 | 19.13 | 306.06 | 306.06 | 未采集 |
+| GPT-2 | v4 | 1 | 128 | 3.51 | 56.19 | 56.19 | 2.28s |
+| GPT-2 | v5 | 1 | 128 | 10.26 | 164.13 | 164.13 | 未采集 |
+| GPT-2 | v6 | 1 | 128 | 10.38 | 166.10 | 166.10 | 未采集 |
+| Qwen2.5-0.5B-Instruct | baseline | 1 | 128 | 1.19 | 19.04 | 19.04 | 6.72s |
+| Qwen2.5-0.5B-Instruct | official | 1 | 128 | 5.32 | 85.19 | 85.19 | 1.50s |
+| Qwen2.5-0.5B-Instruct | v4 | 1 | 128 | 1.54 | 24.68 | 24.68 | 5.19s |
+| Qwen2.5-0.5B-Instruct | v5 | 1 | 128 | 3.62 | 57.85 | 57.85 | 2.21s |
+| Qwen2.5-0.5B-Instruct | v6 | 1 | 128 | 3.63 | 58.05 | 58.05 | 2.21s |
+| Qwen2.5-0.5B-Instruct | official | 4 | 128 | 21.01 | 313.36 | 78.34 | 1.54s |
+| Qwen2.5-0.5B-Instruct | v4 | 4 | 128 | 3.98 | 59.98 | 14.99 | 2.13s |
+| Qwen2.5-0.5B-Instruct | v5 | 4 | 128 | 13.60 | 204.75 | 51.19 | 2.50s |
+| Qwen2.5-0.5B-Instruct | v6 | 4 | 128 | 14.39 | 216.70 | 54.17 | 2.36s |
+| Qwen2.5-0.5B-Instruct | official | 1 | 512 | 1.36 | 85.54 | 85.54 | 5.89s |
+| Qwen2.5-0.5B-Instruct | v4 | 1 | 512 | 0.19 | 12.08 | 12.08 | 41.72s |
+| Qwen2.5-0.5B-Instruct | v5 | 1 | 512 | 0.82 | 51.48 | 51.48 | 9.79s |
+| Qwen2.5-0.5B-Instruct | v6 | 1 | 512 | 0.84 | 53.18 | 53.18 | 9.48s |
+| Qwen2.5-0.5B-Instruct | official | 4 | 512 | 5.40 | 267.12 | 66.78 | 1.58s |
+| Qwen2.5-0.5B-Instruct | v4 | 4 | 512 | 0.45 | 22.22 | 5.55 | 18.90s |
+| Qwen2.5-0.5B-Instruct | v5 | 4 | 512 | 2.83 | 167.38 | 41.84 | 3.01s |
+| Qwen2.5-0.5B-Instruct | v6 | 4 | 512 | 3.03 | 179.41 | 44.85 | 2.81s |
+| Qwen2.5-0.5B-Instruct | official | 1 | 2048 | 1.36 | 85.45 | 85.45 | 5.90s |
+| Qwen2.5-0.5B-Instruct | v4 | 1 | 2048 | 0.19 | 12.11 | 12.11 | 41.63s |
+| Qwen2.5-0.5B-Instruct | v5 | 1 | 2048 | 0.82 | 51.78 | 51.78 | 9.73s |
+| Qwen2.5-0.5B-Instruct | v6 | 1 | 2048 | 0.84 | 52.63 | 52.63 | 9.58s |
 
-### 5.4 Report: 512 Token
-
-| 模型 | 版本 | batch | input toks/s | output toks/s | output toks/s/request | wall time | finish reason |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| Qwen2.5-0.5B-Instruct | v4 | 1 | 0.19 | 12.04 | 12.04 | 41.87s | 未采集 |
-| Qwen2.5-0.5B-Instruct | v5 | 1 | 0.81 | 51.09 | 51.09 | 9.87s | 未采集 |
-| Qwen2.5-0.5B-Instruct | official | 1 | 1.35 | 85.26 | 85.26 | 5.91s | 未采集 |
-| Qwen2.5-0.5B-Instruct | v4 | 4 | 0.45 | 22.12 | 5.53 | 18.99s | 未采集 |
-| Qwen2.5-0.5B-Instruct | v5 | 4 | 2.85 | 168.67 | 42.17 | 2.99s | 未采集 |
-| Qwen2.5-0.5B-Instruct | official | 4 | 5.38 | 266.06 | 66.52 | 1.58s | 未采集 |
-
-### 5.5 本次端到端结果摘要
+### 5.4 本次有效结果摘要
 
 | 对比项 | 结果 |
 | --- | --- |
-| baseline Qwen batch=1 decode, 128 token | 18.19 toks/s，低于 v4/v5/official，符合 reference 只作正确性参考的定位 |
-| v5 相比 v4，Qwen batch=1 decode, 128 token | v5 为 57.11 toks/s，约为 v4 的 2.33 倍 |
-| v5 相比 v4，Qwen batch=4 decode, 128 token | v5 为 203.63 toks/s，约为 v4 的 3.39 倍 |
-| v5 相比 v4，GPT-2 batch=1 decode, 128 token | v5 为 143.25 toks/s，约为 v4 的 2.59 倍 |
-| official 相比 v5，Qwen batch=1 decode, 128 token | official 约为 v5 的 1.49 倍 |
-| official 相比 v5，Qwen batch=4 decode, 128 token | official 约为 v5 的 1.55 倍 |
-| v5 相比 v4，Qwen batch=1 decode, 512 token | v5 为 51.09 toks/s，约为 v4 的 4.24 倍 |
-| v5 相比 v4，Qwen batch=4 decode, 512 token | v5 为 168.67 toks/s，约为 v4 的 7.63 倍 |
-| official 相比 v5，Qwen batch=1 decode, 512 token | official 约为 v5 的 1.67 倍 |
-| official 相比 v5，Qwen batch=4 decode, 512 token | official 约为 v5 的 1.58 倍 |
-| Qwen batch=4 单请求 decode, 512 token | v4 为 5.53 toks/s/request，v5 为 42.17 toks/s/request，official 为 66.52 toks/s/request |
-| v4 多 batch 总吞吐, 512 token | Qwen 从 12.04 toks/s 提升到 22.12 toks/s，约 1.84 倍 |
-| v5 多 batch 总吞吐, 512 token | Qwen 从 51.09 toks/s 提升到 168.67 toks/s，约 3.30 倍 |
-| official 多 batch 总吞吐, 512 token | Qwen 从 85.26 toks/s 提升到 266.06 toks/s，约 3.12 倍 |
+| baseline Qwen batch=1 decode, 128 token | 19.04 toks/s |
+| v4 相比 baseline，Qwen batch=1 decode, 128 token | v4 为 24.68 toks/s，约为 baseline 的 1.30 倍 |
+| v5 相比 v4，Qwen batch=1 decode, 128 token | v5 为 57.85 toks/s，约为 v4 的 2.34 倍 |
+| v6 相比 v5，Qwen batch=1 decode, 128 token | v6 为 58.05 toks/s，约为 v5 的 1.00 倍 |
+| official 相比 v6，Qwen batch=1 decode, 128 token | official 为 85.19 toks/s，约为 v6 的 1.47 倍 |
+| v5 相比 v4，Qwen batch=4 decode, 128 token | v5 为 204.75 toks/s，约为 v4 的 3.41 倍 |
+| v6 相比 v5，Qwen batch=4 decode, 128 token | v6 为 216.70 toks/s，约为 v5 的 1.06 倍 |
+| official 相比 v6，Qwen batch=4 decode, 128 token | official 为 313.36 toks/s，约为 v6 的 1.45 倍 |
+| v5 相比 v4，Qwen batch=4 decode, 512 token | v5 为 167.38 toks/s，约为 v4 的 7.53 倍 |
+| v6 相比 v5，Qwen batch=4 decode, 512 token | v6 为 179.41 toks/s，约为 v5 的 1.07 倍 |
+| official 相比 v6，Qwen batch=4 decode, 512 token | official 为 267.12 toks/s，约为 v6 的 1.49 倍 |
+| v6 相比 v5，Qwen batch=1 decode, 2048 token | v6 为 52.63 toks/s，约为 v5 的 1.02 倍 |
+| official 相比 v6，Qwen batch=1 decode, 2048 token | official 为 85.45 toks/s，约为 v6 的 1.62 倍 |
+| v5 相比 v4，GPT-2 batch=1 decode, 128 token | v5 为 164.13 toks/s，约为 v4 的 2.92 倍 |
+| v6 相比 v5，GPT-2 batch=1 decode, 128 token | v6 为 166.10 toks/s，约为 v5 的 1.01 倍 |
+| official 相比 v6，GPT-2 batch=1 decode, 128 token | official 为 306.06 toks/s，约为 v6 的 1.84 倍 |
 
 ## 6. 版本分析
 
 ### 6.1 baseline
 
-baseline 的角色是正确性参考，不作为性能目标。
-
-性能特征：
-
-| 维度 | 说明 |
-| --- | --- |
-| 运行位置 | Python / PyTorch |
-| 主要用途 | 对拍、dump、replay |
-| 本次数据状态 | Qwen batch=1, 128 token 已采集 |
-
-原因分析：
-
-- baseline 保留了清晰的数学表达，方便定位 mask、GQA、paged KV 和 tail alignment 语义。
-- baseline 没有针对 vLLM 真实推理链路做 kernel 级优化。
-- 本次 baseline 能端到端生成，但 decode 吞吐低于 v4/v5/official。
+- 本次 baseline 只有 `qwen / batch=1 / 128 token` 一个样本。
+- decode 吞吐为 19.04 toks/s。
+- baseline 仍主要用于 reference 和语义对拍，不作为性能目标。
 
 ### 6.2 v4
 
-v4 的角色是当前 toy CUDA baseline。
-
-性能特征：
-
-| 维度 | 说明 |
-| --- | --- |
-| CUDA source | `toy_flash_attn/v4/flash_attn_func.cu` |
-| storage dtype | bf16 |
-| accumulator dtype | fp32 |
-| GQA | 支持 |
-| Tensor Core | 未使用 |
-| 主要用途 | 验证 paged KV / GQA / online softmax / vLLM 接入 |
-
-原因分析：
-
-- v4 的外层 grid 是 `batch x q_chunk x q_head`，多 batch 会增加 block 数，有利于提升 GPU occupancy。
-- v4 的 QK 阶段使用标量乘法和手写 reduction，没有使用 Tensor Core / MMA。
-- v4 的 softmax 阶段使用手写 online reduction，同步点较多。
-- v4 的 PV 阶段按 `head_off` 串行处理 head_dim，head_dim=64 时会产生明显循环开销。
-- v4 保留了多个中间 shared tile，例如 `score/max/sum/softmax/qk_reduction/sv_reduction/out_reduction`，shared memory 占用较高。
-- 在 512 token 的 Qwen case 中，v4 与 v5/official 的差距比 128 token 更明显。
+- v4 本轮 6 个 case 全部有效。
+- Qwen 上：
+  - `batch=1` 时，128/512/2048 token 的 decode 吞吐分别为 24.68 / 12.08 / 12.11 toks/s。
+  - `batch=4` 时，128/512 token 的 decode 吞吐分别为 59.98 / 22.22 toks/s。
+- 相比 v5/v6/official，v4 在中长序列上的差距仍然很大，尤其是 512 和 2048 token。
 
 ### 6.3 v5
 
-v5 的角色是 WMMA / Tensor Core toy CUDA kernel。
+- v5 本轮 6 个 case 全部有效，是完整的自定义 backend 基线。
+- Qwen 上：
+  - `batch=1` 时，128/512/2048 token 的 decode 吞吐分别为 57.85 / 51.48 / 51.78 toks/s。
+  - `batch=4` 时，128/512 token 的 decode 吞吐分别为 204.75 / 167.38 toks/s。
+- GPT-2 `batch=1 / 128 token` 的 decode 吞吐为 164.13 toks/s。
 
-性能特征：
+### 6.4 v6
 
-| 维度 | 说明 |
-| --- | --- |
-| CUDA source | `toy_flash_attn/v5/flash_attn_func.cu` |
-| storage dtype | bf16 |
-| accumulator dtype | fp32 |
-| GQA | 支持 |
-| Tensor Core | 使用 WMMA |
-| 当前绑定 | `flash_attn_varlen_with_block_v5_64` |
-| 本次数据状态 | 128 token 与 512 token 均已采集 |
+- v6 本轮 6 个 case 全部有效。
+- Qwen 上：
+  - `batch=1` 时，128/512/2048 token 的 decode 吞吐分别为 58.05 / 53.18 / 52.63 toks/s。
+  - `batch=4` 时，128/512 token 的 decode 吞吐分别为 216.70 / 179.41 toks/s。
+- GPT-2 `batch=1 / 128 token` 的 decode 吞吐为 166.10 toks/s。
+- 相比 v5，v6 在当前有效样本上是稳定小幅领先：
+  - Qwen `batch=1 / 128 token`：1.00 倍
+  - Qwen `batch=4 / 128 token`：1.06 倍
+  - Qwen `batch=4 / 512 token`：1.07 倍
+  - Qwen `batch=1 / 2048 token`：1.02 倍
+  - GPT-2 `batch=1 / 128 token`：1.01 倍
 
-原因分析：
+### 6.5 official
 
-- v5 的 QK 阶段使用 WMMA 表达 `Q @ K^T`，输入为 bf16，累加为 fp32。
-- v5 的 softmax 阶段仍使用 fp32 计算 max/sum，随后将 softmax numerator 量化为 bf16 供 PV 的 WMMA 路径使用。
-- v5 的 PV 阶段使用 WMMA 表达 `P @ V`，输入为 bf16，累加为 fp32。
-- v5 的 chunk merge 和最终 out 累积仍保留 fp32 路径，最后写回 bf16。
-- 在本次端到端数据中，v5 相比 v4 有明显提升；512 token 下提升幅度更大，但仍低于 official。
-
-### 6.4 official
-
-official 的角色是生产级性能基线。
-
-性能特征：
-
-| 维度 | 说明 |
-| --- | --- |
-| backend | vLLM 官方 `FLASH_ATTN` |
-| kv_cache_dtype | `auto`，本次解析为 torch.bfloat16 |
-| 主要用途 | 端到端性能基线 |
-| 性能预期 | 快 |
-
-原因分析：
-
-- official backend 使用成熟的 FlashAttention 实现。
-- official backend 通常包含更好的 tile 策略、memory pipeline 和 kernel 调度。
-- official backend 可作为性能上界参考，但不直接解释 toy kernel 内部瓶颈。
+- official 本轮 6 个 case 全部有效。
+- Qwen 上：
+  - `batch=1` 时，128/512/2048 token 的 decode 吞吐分别为 85.19 / 85.54 / 85.45 toks/s。
+  - `batch=4` 时，128/512 token 的 decode 吞吐分别为 313.36 / 267.12 toks/s。
+- GPT-2 `batch=1 / 128 token` 的 decode 吞吐为 306.06 toks/s。
+- 当前所有可比 case 上，official 都明显快于 v4/v5/v6。
 
 ## 7. 结论
 
-| 问题 | 结论 |
-| --- | --- |
-| baseline 是否能端到端运行 | 能。本次 Qwen batch=1, 128 token 成功生成，但只适合作正确性参考，不作为性能目标。 |
-| v4 是否能端到端运行 | 能。本次 GPT-2 和 Qwen2.5-0.5B-Instruct 的 v4 case 均成功生成。 |
-| v5 是否能端到端运行 | 能。本次 GPT-2 和 Qwen2.5-0.5B-Instruct 的 v5 case 均成功生成。 |
-| v5 是否提升 toy backend 吞吐 | 能。Qwen 512 token 下，batch=1 decode 从 v4 的 12.04 toks/s 提升到 v5 的 51.09 toks/s，batch=4 从 22.12 toks/s 提升到 168.67 toks/s。 |
-| toy backend 与 official 的主要差距 | v5 已缩小差距，但仍低于 official；Qwen 512 token 下 official 约为 v5 的 1.67 倍（batch=1）和 1.58 倍（batch=4）。 |
-| v4 当前主要瓶颈 | 标量 QK/PV 计算、未使用 Tensor Core、shared memory 中间 tile 较多、同步点和 head_dim 串行循环开销较大。 |
+本轮 benchmark 的主要结论是：
+
+1. `baseline / v4 / v5 / v6 / official` 全部目标 case 都已采集到有效数据。
+2. `v6` 在本轮所有与 `v5` 可比的有效样本上都略快，但提升幅度普遍较小，约在 1.00 到 1.07 倍之间。
+3. `v5` 到 `v6` 的提升主要体现在 Qwen 的 batch=4 case，尤其是 128 和 512 token。
+4. `official` 仍是当前性能上界，在所有可比 case 上都显著快于 `v6`。
