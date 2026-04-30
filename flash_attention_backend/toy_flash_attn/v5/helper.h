@@ -108,4 +108,3 @@ struct WmmaElement<float> {
         return reinterpret_cast<const type*>(p);
     }
 };
-

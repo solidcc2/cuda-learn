@@ -509,6 +509,22 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
                 }
             }
             __syncthreads();
+#ifdef DEBUG_FLASH_ATTN_TRACE
+            if (param.batch_id() == 0 &&
+                param.head_id() == 0 &&
+                kv_chunk_id == kv_chunk_end - 1 &&
+                threadIdx.x == 0 &&
+                threadIdx.y == 0) {
+                printf("QK_TILE_V5 chunk=%lld\n", (long long)kv_chunk_id);
+                for (int q_row = 0; q_row < 2 && q_row < Q_CHUNK_SIZE; ++q_row) {
+                    printf("  row %d:", q_row);
+                    for (int seq_col = 0; seq_col < 8 && seq_col < KV_CHUNK_SIZE; ++seq_col) {
+                        printf(" %0.6f", (double)layout.score_reduction_at(q_row, seq_col));
+                    }
+                    printf("\n");
+                }
+            }
+#endif
         }
         {   // online softmax
             constexpr int64_t x_group = KV_CHUNK_SIZE / block_x;
@@ -669,6 +685,22 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, block_
 
             }
             __syncthreads();
+#ifdef DEBUG_FLASH_ATTN_TRACE
+            if (param.batch_id() == 0 &&
+                param.head_id() == 0 &&
+                kv_chunk_id == kv_chunk_end - 1 &&
+                threadIdx.x == 0 &&
+                threadIdx.y == 0) {
+                printf("P_TILE_V5 chunk=%lld\n", (long long)kv_chunk_id);
+                for (int q_row = 0; q_row < 2 && q_row < Q_CHUNK_SIZE; ++q_row) {
+                    printf("  row %d:", q_row);
+                    for (int seq_col = 0; seq_col < 8 && seq_col < KV_CHUNK_SIZE; ++seq_col) {
+                        printf(" %0.6f", (double)layout.softmax_reduction_at(q_row, seq_col));
+                    }
+                    printf("\n");
+                }
+            }
+#endif
         }
         {   // load V
             constexpr int64_t x_group = head_dim_stride / block_x;

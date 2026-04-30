@@ -508,6 +508,21 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread
                 }
             }
             __syncthreads();
+#ifdef DEBUG_FLASH_ATTN_TRACE
+            if (param.batch_id() == 0 &&
+                param.q_head_id() == 0 &&
+                kv_chunk_id == kv_chunk_end - 1 &&
+                threadIdx.x == 0) {
+                printf("QK_TILE_V6 chunk=%lld\n", (long long)kv_chunk_id);
+                for (int q_row = 0; q_row < 2 && q_row < Q_CHUNK_SIZE; ++q_row) {
+                    printf("  row %d:", q_row);
+                    for (int seq_col = 0; seq_col < 8 && seq_col < KV_CHUNK_SIZE; ++seq_col) {
+                        printf(" %0.6f", (double)sTensor_score(q_row, seq_col));
+                    }
+                    printf("\n");
+                }
+            }
+#endif
         }
         {   // online softmax
 
@@ -515,10 +530,12 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread
             toy_flash_attn_assert(thread_block_size >= KV_CHUNK_SIZE);
             toy_flash_attn_assert(thread_block_size % WARP_SIZE == 0);
             toy_flash_attn_assert(KV_CHUNK_SIZE % WARP_SIZE == 0);
-            constexpr int warp_chunk_num = KV_CHUNK_SIZE / WARP_SIZE * Q_CHUNK_SIZE;
             for(int linear=threadIdx.x; linear<cute::size(sTensor_score); linear += thread_block_size) {
-                auto coord = cute::idx2crd(linear, cute::shape(sTensor_score));
-                auto val = sTensor_score(coord);
+                // auto coord = cute::idx2crd(linear, cute::Shape<cute::Int<KV_CHUNK_SIZE>, cute::Int<Q_CHUNK_SIZE>>{});
+                // auto coord = cute::idx2crd(linear, cute::shape(sTensor_score));
+                auto q_off = linear / KV_CHUNK_SIZE;
+                auto seq_off = linear % KV_CHUNK_SIZE;
+                auto val = sTensor_score(q_off, seq_off);
                 auto max_ = val;
                 auto sum_ = val == inner_scalar_t{-INFINITY} ? inner_scalar_t{0} : inner_scalar_t{1};
                 auto max_neighbor = __shfl_down_sync(0xffffffff, max_, 16);
@@ -567,7 +584,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread
                 sum_ = sum_merge;
                 
                 int warp_off = linear % WARP_SIZE;
-                auto [q_off, seq_off] = coord;
+                // auto [q_off, seq_off] = coord;
                 auto warp_in_row = seq_off / WARP_SIZE;
                 if (warp_off == 0) {
                     sTensor_warp_max(q_off, warp_in_row) = max_;
@@ -575,6 +592,26 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread
                 }
             }
             __syncthreads();
+#ifdef DEBUG_FLASH_ATTN_TRACE
+            if (param.batch_id() == 0 &&
+                param.q_head_id() == 0 &&
+                kv_chunk_id == kv_chunk_end - 1 &&
+                threadIdx.x == 0) {
+                printf("WARP_STAGE1_V6 chunk=%lld\n", (long long)kv_chunk_id);
+                for (int q_row = 0; q_row < 2 && q_row < Q_CHUNK_SIZE; ++q_row) {
+                    printf("  row %d max:", q_row);
+                    for (int col = 0; col < KV_CHUNK_SIZE / WARP_SIZE; ++col) {
+                        printf(" %0.6f", (double)sTensor_warp_max(q_row, col));
+                    }
+                    printf("\n");
+                    printf("  row %d sum:", q_row);
+                    for (int col = 0; col < KV_CHUNK_SIZE / WARP_SIZE; ++col) {
+                        printf(" %0.6f", (double)sTensor_warp_sum(q_row, col));
+                    }
+                    printf("\n");
+                }
+            }
+#endif
 
             constexpr auto subgroup = KV_CHUNK_SIZE / WARP_SIZE;
             constexpr auto subgroup_num = WARP_SIZE / subgroup;
@@ -687,6 +724,21 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, head_dim_stride, thread
                 sTensor_softmax(coord) = scalar_t{softmax};
             }
             __syncthreads();
+#ifdef DEBUG_FLASH_ATTN_TRACE
+            if (param.batch_id() == 0 &&
+                param.q_head_id() == 0 &&
+                kv_chunk_id == kv_chunk_end - 1 &&
+                threadIdx.x == 0) {
+                printf("P_TILE_V6 chunk=%lld\n", (long long)kv_chunk_id);
+                for (int q_row = 0; q_row < 2 && q_row < Q_CHUNK_SIZE; ++q_row) {
+                    printf("  row %d:", q_row);
+                    for (int seq_col = 0; seq_col < 8 && seq_col < KV_CHUNK_SIZE; ++seq_col) {
+                        printf(" %0.6f", (double)sTensor_softmax(q_row, seq_col));
+                    }
+                    printf("\n");
+                }
+            }
+#endif
         }
         {    // P @ V
             constexpr int WARP_NUM = thread_block_size / WARP_SIZE;

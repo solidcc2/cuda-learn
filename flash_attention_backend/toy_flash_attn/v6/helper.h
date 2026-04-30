@@ -78,4 +78,3 @@ __device__ inline void busy_wait(unsigned long long delay_cycles) {
     while (clock64() - start < delay_cycles) {
     }
 }
-
