@@ -2,8 +2,8 @@
 #include <ATen/cuda/CUDAContext.h>
 
 
-# define TOY_FLASH_ATTN_ASSERT_ON
-# define DEBUG_NUMERIC
+// # define TOY_FLASH_ATTN_ASSERT_ON
+// # define DEBUG_NUMERIC
 // # define DEBUG_FLASH_ATTN_TRACE
 
 #ifdef TOY_FLASH_ATTN_ASSERT_ON
@@ -78,4 +78,3 @@ __device__ inline void busy_wait(unsigned long long delay_cycles) {
     while (clock64() - start < delay_cycles) {
     }
 }
-
