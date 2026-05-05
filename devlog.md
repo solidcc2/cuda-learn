@@ -14,6 +14,25 @@
 8. 浮点0乘法，可能会因为无关数值，引入正负0,如果为了严格数值对拍和稳定性，最好不要依赖数值计算带来的路径选择，包括+/-inf, +/-0
 
 ## Dev Log
+### 20260505
+1. AI重构了当前的bench & test & analysis架构。拆成e2e & op & correctness & ncu perf分类bench & 报告。
+2. ncu进行一轮v6和official对照分析，现有问题：
+    - v6的global memory access不合并
+    > This workload has uncoalesced global accesses resulting in a total of 215040 excessive sectors
+    > 92% of the total 234024 sectors
+
+    - shared memory bank conflict严重
+    > 178304 bank conflicts
+    > 占 shared store 总 wavefront 的 91.56%
+
+这些导致eligible warp低，低占用率。
+
+后续计划：
+1. 考虑gmem访问方案，结合kv cache设计，看能不能构建索引，成块读入，smem重排。
+2. 引入swizzle，降低bank conflict，这个应该是最好实现的。
+3. 新一轮重构，按照更cute的方案实现，先定tv layout形状，将块大小优化变成搜索过程，实现提高eligible warp。
+
+
 ### 20260430
 逐阶段与v5做了数值对拍，确认问题发生的原因：
 1. 在softmax warp归约第一阶段，idx2crd是默认按列方向为主方向的，导致warp归约顺序出错。

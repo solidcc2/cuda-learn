@@ -21,6 +21,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--correctness-input", type=Path, required=True)
     parser.add_argument("--correctness-output", type=Path, required=True)
     parser.add_argument("--version-summary", type=Path, required=True)
+    parser.add_argument("--profiling-summary", type=Path, required=False, default=None)
+    parser.add_argument("--profiling-root", type=Path, required=False, default=None)
     parser.add_argument("--output", type=Path, required=True)
     return parser.parse_args()
 
@@ -33,6 +35,25 @@ def _load_optional_json(path: Path) -> dict[str, Any] | None:
     if not path.exists():
         return None
     return _load_json(path)
+
+
+def _load_profiling_payload(summary_path: Path | None, root: Path | None) -> dict[str, Any] | None:
+    summaries: list[dict[str, Any]] = []
+    if root is not None and root.exists():
+        for path in sorted(root.glob("*/summary.json")):
+            summaries.append(_load_json(path))
+    if summaries:
+        if len(summaries) == 1:
+            return summaries[0]
+        return {
+            "kind": "flash_attention_backend.ncu_summary_collection",
+            "status": "已采集",
+            "case_count": len(summaries),
+            "cases": summaries,
+        }
+    if summary_path is not None:
+        return _load_optional_json(summary_path)
+    return None
 
 
 def _aggregate_op_results(op_dir: Path) -> dict[str, Any]:
@@ -52,6 +73,7 @@ def main() -> None:
     op_summary = _aggregate_op_results(args.op_dir)
     correctness_summary = _load_optional_json(args.correctness_input)
     version_summary = _load_optional_json(args.version_summary)
+    profiling_summary = _load_profiling_payload(args.profiling_summary, args.profiling_root)
 
     write_json(args.op_output, op_summary)
     if correctness_summary is not None:
@@ -64,7 +86,9 @@ def main() -> None:
         "op": op_summary,
         "correctness": correctness_summary,
         "version_optimizations": version_summary,
-        "profiling": {
+        "profiling": profiling_summary
+        if profiling_summary is not None
+        else {
             "status": "未采集",
             "note": "Unified analysis entry does not execute profiler runs by default.",
         },

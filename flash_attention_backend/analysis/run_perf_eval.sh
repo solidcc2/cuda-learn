@@ -11,18 +11,26 @@ SKIP_OP=0
 SKIP_CORRECTNESS=0
 SKIP_VERSION_SUMMARY=0
 SKIP_REPORT_INPUTS=0
+SKIP_NCU=0
+WITH_NCU=0
+NCU_CASE=""
+NCU_VERSIONS="v6,official"
+NCU_SET="full"
 
 E2E_RUNNER="${BACKEND_ROOT}/bench/e2e/collect_e2e.sh"
 OP_RUNNER="${BACKEND_ROOT}/bench/op/bench_attention_op.py"
 CORRECTNESS_RUNNER="${SCRIPT_DIR}/collect_correctness_metrics.py"
 VERSION_SUMMARY_RUNNER="${SCRIPT_DIR}/summarize_version_optimizations.py"
 REPORT_INPUT_RUNNER="${SCRIPT_DIR}/build_report_inputs.py"
+NCU_RUNNER="${SCRIPT_DIR}/run_ncu_case.sh"
+NCU_SUMMARY_RUNNER="${SCRIPT_DIR}/summarize_ncu_report.py"
 
 ARTIFACT_ROOT="${PERF_EVAL_ARTIFACT_DIR:-${SCRIPT_DIR}/artifacts}"
 E2E_DIR="${ARTIFACT_ROOT}/e2e"
 OP_DIR="${ARTIFACT_ROOT}/op"
 CORRECTNESS_DIR="${ARTIFACT_ROOT}/correctness"
 REPORT_DIR="${ARTIFACT_ROOT}/report"
+NCU_DIR="${ARTIFACT_ROOT}/ncu"
 
 E2E_JSON_DIR="${E2E_DIR}/perf_json"
 E2E_LOG_DIR="${E2E_DIR}/perf_logs"
@@ -37,6 +45,8 @@ CORRECTNESS_SUMMARY="${CORRECTNESS_DIR}/correctness_summary.json"
 
 VERSION_SUMMARY_OUTPUT="${REPORT_DIR}/version_optimizations.json"
 REPORT_INPUT_OUTPUT="${REPORT_DIR}/report_inputs.json"
+NCU_CASE_DIR=""
+NCU_SUMMARY_OUTPUT=""
 
 WARMUP="${PERF_EVAL_WARMUP:-1}"
 REPEAT="${PERF_EVAL_REPEAT:-3}"
@@ -48,6 +58,8 @@ usage() {
 Usage:
   run_perf_eval.sh [light|full] [--skip-e2e] [--skip-op] [--skip-correctness]
                    [--skip-version-summary] [--skip-report-inputs]
+                   [--with-ncu --ncu-case <case> [--ncu-versions v6,official] [--ncu-set full]]
+                   [--skip-ncu]
 
 Modes:
   light  Default. Collects smoke-level e2e, minimal op cases, correctness
@@ -61,6 +73,13 @@ Skip flags:
   --skip-correctness
   --skip-version-summary
   --skip-report-inputs
+  --skip-ncu
+
+NCU:
+  --with-ncu
+  --ncu-case <case>
+  --ncu-versions v6,official
+  --ncu-set full
 
 Environment:
   PYTHON_BIN
@@ -69,6 +88,7 @@ Environment:
   PERF_EVAL_REPEAT
   PERF_EVAL_OP_WARMUP
   PERF_EVAL_OP_ITERS
+  NCU_BIN
 EOF
 }
 
@@ -99,6 +119,26 @@ parse_args() {
         SKIP_REPORT_INPUTS=1
         shift
         ;;
+      --skip-ncu)
+        SKIP_NCU=1
+        shift
+        ;;
+      --with-ncu)
+        WITH_NCU=1
+        shift
+        ;;
+      --ncu-case)
+        NCU_CASE="$2"
+        shift 2
+        ;;
+      --ncu-versions)
+        NCU_VERSIONS="$2"
+        shift 2
+        ;;
+      --ncu-set)
+        NCU_SET="$2"
+        shift 2
+        ;;
       -h|--help)
         usage
         exit 0
@@ -110,6 +150,21 @@ parse_args() {
         ;;
     esac
   done
+}
+
+validate_ncu_args() {
+  if [[ "${WITH_NCU}" -eq 1 && "${SKIP_NCU}" -eq 1 ]]; then
+    echo "--with-ncu and --skip-ncu cannot be used together" >&2
+    exit 2
+  fi
+  if [[ "${WITH_NCU}" -eq 1 && -z "${NCU_CASE}" ]]; then
+    echo "--with-ncu requires --ncu-case" >&2
+    exit 2
+  fi
+  if [[ -n "${NCU_CASE}" ]]; then
+    NCU_CASE_DIR="${NCU_DIR}/${NCU_CASE}"
+    NCU_SUMMARY_OUTPUT="${NCU_CASE_DIR}/summary.json"
+  fi
 }
 
 timed_section() {
@@ -132,7 +187,8 @@ ensure_dirs() {
     "${OP_CASE_DIR}" \
     "${OP_LOG_DIR}" \
     "${CORRECTNESS_LOG_DIR}" \
-    "${REPORT_DIR}"
+    "${REPORT_DIR}" \
+    "${NCU_DIR}"
 }
 
 run_e2e() {
@@ -214,17 +270,43 @@ run_version_summary() {
       --output "${VERSION_SUMMARY_OUTPUT}"
 }
 
+run_ncu() {
+  if [[ -z "${NCU_CASE}" ]]; then
+    echo "internal error: NCU_CASE is empty" >&2
+    exit 2
+  fi
+  echo "[NCU] case=${NCU_CASE} versions=${NCU_VERSIONS}"
+  timed_section "ncu case=${NCU_CASE}" \
+    bash "${NCU_RUNNER}" \
+      --case "${NCU_CASE}" \
+      --versions "${NCU_VERSIONS}" \
+      --output-dir "${NCU_CASE_DIR}" \
+      --set "${NCU_SET}"
+  timed_section "ncu summary case=${NCU_CASE}" \
+    "${PYTHON_BIN}" "${NCU_SUMMARY_RUNNER}" \
+      --input-dir "${NCU_CASE_DIR}" \
+      --case "${NCU_CASE}" \
+      --output-json "${NCU_SUMMARY_OUTPUT}" \
+      --output-md "${NCU_CASE_DIR}/SUMMARY.md"
+}
+
 build_report_inputs() {
+  local -a cmd=(
+    "${PYTHON_BIN}" "${REPORT_INPUT_RUNNER}"
+    --e2e-summary "${E2E_OUTPUT}"
+    --op-dir "${OP_CASE_DIR}"
+    --correctness-input "${CORRECTNESS_SUMMARY}"
+    --correctness-output "${CORRECTNESS_SUMMARY}"
+    --version-summary "${VERSION_SUMMARY_OUTPUT}"
+    --op-output "${OP_RESULTS}"
+    --profiling-root "${NCU_DIR}"
+    --output "${REPORT_INPUT_OUTPUT}"
+  )
+  if [[ -n "${NCU_SUMMARY_OUTPUT}" ]]; then
+    cmd+=(--profiling-summary "${NCU_SUMMARY_OUTPUT}")
+  fi
   echo "[REPORT] building report inputs"
-  timed_section "report_inputs" \
-    "${PYTHON_BIN}" "${REPORT_INPUT_RUNNER}" \
-      --e2e-summary "${E2E_OUTPUT}" \
-      --op-dir "${OP_CASE_DIR}" \
-      --correctness-input "${CORRECTNESS_SUMMARY}" \
-      --correctness-output "${CORRECTNESS_SUMMARY}" \
-      --version-summary "${VERSION_SUMMARY_OUTPUT}" \
-      --op-output "${OP_RESULTS}" \
-      --output "${REPORT_INPUT_OUTPUT}"
+  timed_section "report_inputs" "${cmd[@]}"
   echo "[REPORT] output=${REPORT_INPUT_OUTPUT}"
 }
 
@@ -235,6 +317,7 @@ main() {
     usage >&2
     exit 2
   fi
+  validate_ncu_args
 
   ensure_dirs
   if [[ "${SKIP_E2E}" -eq 0 ]]; then
@@ -260,6 +343,11 @@ main() {
     run_version_summary
   else
     echo "[SKIP] version_summary"
+  fi
+  if [[ "${WITH_NCU}" -eq 1 && "${SKIP_NCU}" -eq 0 ]]; then
+    run_ncu
+  else
+    echo "[SKIP] ncu"
   fi
   if [[ "${SKIP_REPORT_INPUTS}" -eq 0 ]]; then
     build_report_inputs

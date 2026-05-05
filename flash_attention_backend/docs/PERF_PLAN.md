@@ -37,6 +37,8 @@ flash_attention_backend/analysis/
   collect_correctness_metrics.py
   build_report_inputs.py
   summarize_version_optimizations.py
+  run_ncu_case.sh
+  summarize_ncu_report.py
 
   artifacts/
     e2e/
@@ -50,8 +52,18 @@ flash_attention_backend/analysis/
     correctness/
       logs/
       correctness_summary.json
-    profile/
-      profile_manifest.json
+    ncu/
+      <case>/
+        v6.ncu-rep
+        v6.log
+        v6_raw.csv
+        input_meta_v6.json
+        official.ncu-rep
+        official.log
+        official_raw.csv
+        input_meta_official.json
+        summary.json
+        SUMMARY.md
     report/
       report_inputs.json
       version_optimizations.json
@@ -104,9 +116,13 @@ flash_attention_backend/analysis/
 
 建议落产物：
 
-- `analysis/artifacts/profile/profile_manifest.json`
+- `analysis/artifacts/ncu/<case>/summary.json`
+- `analysis/artifacts/ncu/<case>/SUMMARY.md`
 
-当前建议先固定 profiling case 和命令，不在 `analysis/` 内自动跑 `ncu`。
+当前建议通过统一入口显式开启 NCU，而不是默认执行：
+
+- 默认：不跑 NCU
+- 显式：`analysis/run_perf_eval.sh --with-ncu --ncu-case <case>`
 
 ## 5. 报告输入
 
@@ -123,6 +139,8 @@ flash_attention_backend/analysis/
 - `op`
 - `profiling`
 - `version_optimizations`
+
+当存在 NCU 产物时，`profiling` 应优先接入 `summary.json`；不存在时保留 `未采集`。
 
 ## 6. 版本实现与优化摘要
 

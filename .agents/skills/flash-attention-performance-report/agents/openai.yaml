@@ -1,6 +1,6 @@
 interface:
   display_name: "Flash Attention 性能报告"
-  short_description: "默认用现有产物更新报告，可按要求跑轻量或全量 bench"
-  default_prompt: "使用 $flash-attention-performance-report：默认基于现有 benchmark 产物更新性能报告；只有我明确要求刷新数据时，才运行轻量或全量 benchmark。"
+  short_description: "默认只更新报告；可按中文选项选择轻量/全量 bench，或附加 NCU"
+  default_prompt: "使用 $flash-attention-performance-report：默认基于现有 benchmark 产物更新性能报告；如果我只说更新报告，优先按“仅更新报告（推荐）”处理；如果需要重跑，请用中文选项提示我选择“刷新轻量数据并更新报告”“刷新全量数据并更新报告”“刷新轻量数据并重跑 NCU”或“刷新全量数据并重跑 NCU”。"
 policy:
   allow_implicit_invocation: true

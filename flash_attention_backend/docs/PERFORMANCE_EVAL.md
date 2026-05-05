@@ -13,7 +13,7 @@
 - `E2E Benchmark`：smoke 级 case
 - `Op Benchmark`：最小标准 case 集
 - `Correctness`：collect 模式摘要
-- `Profiling`：仅保留章节与状态，不包含实测 profiler 结果
+- `Profiling`：3 个显式触发的 NCU case
 
 当前报告纳入的版本：
 
@@ -180,29 +180,29 @@
 
 | case | 版本 | path | output toks/s | avg latency |
 | --- | --- | --- | --- | --- |
-| `gpt2_b1_t128` | baseline | paged | `3.91` | `32777.59 ms` |
-| `gpt2_b1_t128` | v5 | paged | `104.93` | `1219.92 ms` |
-| `gpt2_b1_t128` | v6 | paged | `106.39` | `1203.17 ms` |
-| `gpt2_b1_t128` | official | dense | `742.97` | `172.28 ms` |
-| `qwen_b1_t128` | baseline | paged | `1.78` | `72109.61 ms` |
-| `qwen_b1_t128` | v5 | paged | `54.73` | `2338.77 ms` |
-| `qwen_b1_t128` | v6 | paged | `54.66` | `2341.74 ms` |
-| `qwen_b1_t128` | official | dense | `309.22` | `413.95 ms` |
-| `qwen_b4_t128` | baseline | paged | `1.85` | `276716.26 ms` |
-| `qwen_b4_t128` | v5 | paged | `213.26` | `2400.82 ms` |
-| `qwen_b4_t128` | v6 | paged | `214.61` | `2385.73 ms` |
-| `qwen_b4_t128` | official | dense | `1216.80` | `420.78 ms` |
+| `gpt2_b1_t128` | baseline | paged | `3.96` | `32306.23 ms` |
+| `gpt2_b1_t128` | v5 | paged | `102.54` | `1248.28 ms` |
+| `gpt2_b1_t128` | v6 | paged | `107.73` | `1188.18 ms` |
+| `gpt2_b1_t128` | official | dense | `691.53` | `185.10 ms` |
+| `qwen_b1_t128` | baseline | paged | `1.83` | `69852.85 ms` |
+| `qwen_b1_t128` | v5 | paged | `52.22` | `2451.14 ms` |
+| `qwen_b1_t128` | v6 | paged | `53.68` | `2384.31 ms` |
+| `qwen_b1_t128` | official | dense | `321.51` | `398.12 ms` |
+| `qwen_b4_t128` | baseline | paged | `1.89` | `271356.92 ms` |
+| `qwen_b4_t128` | v5 | paged | `208.50` | `2455.59 ms` |
+| `qwen_b4_t128` | v6 | paged | `210.86` | `2428.14 ms` |
+| `qwen_b4_t128` | official | dense | `1191.08` | `429.86 ms` |
 
 ### 6.3 E2E 摘要
 
 | 对比项 | 结果 |
 | --- | --- |
-| `qwen_b1_t128`：`v6 / v5` | `1.00x` |
-| `qwen_b1_t128`：`official / v6` | `5.66x` |
+| `qwen_b1_t128`：`v6 / v5` | `1.03x` |
+| `qwen_b1_t128`：`official / v6` | `5.99x` |
 | `qwen_b4_t128`：`v6 / v5` | `1.01x` |
-| `qwen_b4_t128`：`official / v6` | `5.67x` |
-| `gpt2_b1_t128`：`v6 / v5` | `1.01x` |
-| `gpt2_b1_t128`：`official / v6` | `6.98x` |
+| `qwen_b4_t128`：`official / v6` | `5.65x` |
+| `gpt2_b1_t128`：`v6 / v5` | `1.05x` |
+| `gpt2_b1_t128`：`official / v6` | `6.42x` |
 
 当前观察：
 
@@ -259,25 +259,41 @@
 
 ## 8. Profiling
 
-当前状态：`未采集`
+当前状态：`已采集`
 
-原因：
+当前 profiling 数据来自显式开启的 NCU 采集，而不是默认统一入口：
 
-- 统一入口默认不会执行 profiler
-- 当前只建立了稳定 profiling 入口，而没有自动生成 profiler 结果
+- `analysis/run_perf_eval.sh --with-ncu`
+- `analysis/run_ncu_case.sh`
+- `analysis/summarize_ncu_report.py`
 
-当前已具备的 profiling 入口：
+本轮已采集 case：
 
-- `bench/op/profile_attention_op.py`
+| case | v6 kernel 时长 | official kernel 时长 | v6 / official |
+| --- | --- | --- | --- |
+| `qwen_like_b1_s128_h64` | `45.152 us` | `8.576 us` | `5.26x` |
+| `qwen_like_b4_s512_h64` | `163.840 us` | `9.952 us` | `16.46x` |
+| `qwen_like_b1_s2048_h64` | `635.520 us` | `9.632 us` | `65.98x` |
 
-本节的职责是：
+当前 3 个 case 共同出现的风险标签：
 
-- 固定 `version`
-- 固定 `case`
-- 固定输入元数据
-- 为后续 `ncu` / kernel 级分析提供稳定复现入口
+- `underfilled_grid`
+- `scheduler_starvation_risk`
+- `uncoalesced_global_access_risk`
+- `shared_bank_conflict_risk`
+- `local_spill_risk`
 
-它不属于默认性能采集的一部分，所以当前报告应明确写 `未采集`，而不是伪造 profiling 结论。
+当前可以直接从摘要读出的事实：
+
+- `v6` 在 3 个采集 case 上都明显慢于 `official`
+- 随着 `k_lens` 增大，`v6 / official` 的 kernel 时长倍率显著放大
+- `v6` 的 grid 很小，`eligible warps per scheduler` 长期只有 `~0.14`
+- `v6` 的 global excessive sectors 和 shared bank conflict 指标明显高于 `official`
+
+边界说明：
+
+- 本轮 NCU 摘要主要稳定提取了 kernel 时长、吞吐、active/eligible warps、grid/block、shared bank conflict 和访存放大指标
+- `dram_throughput_pct`、`l2_hit_rate`、`achieved_occupancy_pct` 在当前导出格式下仍未稳定解析，因此本节不把它们写成结论
 
 ## 9. 版本分析
 
@@ -298,12 +314,15 @@
 - correctness collect 模式主线已明确收敛到 `head_dim=64`
 - e2e 上只比 `v5` 小幅领先
 - op 层在 `qwen_like_b1_s128_h64` 上相对 `v5` 有更明显优势
+- NCU 显示 `v6` 在当前 3 个 hd64 case 上都明显慢于 `official`
+- 当前主要嫌疑已从“单纯算力不足”收窄到访存与调度效率问题
 
 ### official
 
 - e2e 上仍是当前 smoke 样本的明显上界
 - op 层和 `v6` 的差距不总是大，说明 e2e 差距不应直接等同于单 kernel 差距
 - 当前仍应把它理解为对照路径，而不是与 paged-op 完全同构的单接口基线
+- 当前 NCU 结果表明，在选定 hd64 case 上，`official` kernel 时长仍显著优于 `v6`
 
 ## 10. 分层结论
 
@@ -313,5 +332,9 @@
    - `head_dim=16/32` 当前应视为 `unsupported`
    - `head_dim=64` 敏感 case 当前表现为 `sensitive`，不是结构性错误
 3. e2e smoke 上，`v5` 和 `v6` 基本持平，而 `official` 仍明显快于两者。
-4. op 层结果显示，`v6` 并非在所有单接口 case 上都远落后于 `official`；因此 e2e 差距不能直接归因为单 kernel 算力不足。
-5. profiling 章节当前仍是 `未采集`，后续要依赖 `profile_attention_op.py` 和外部 profiler 数据补全 kernel 级瓶颈结论。
+4. op 层结果显示，`v6` 并非在所有单接口 case 上都远落后于 `official`；因此 e2e 差距不能只看单一 op 均值。
+5. 当前已采到 3 个 hd64 NCU case，`v6 / official` 的 kernel 时长倍率分别约为 `5.26x / 16.46x / 65.98x`，说明 kernel 级差距真实存在。
+6. NCU 摘要已把问题方向收窄到访存与调度效率：
+   - `eligible warps per scheduler` 很低
+   - `underfilled grid` 明显
+   - global access 放大与 shared bank conflict 风险持续存在
