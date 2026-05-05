@@ -50,7 +50,9 @@
 
 CUDA 源文件版本由另一个环境变量控制，必须在 import `flash_attention_func.py` 之前设置：
 
-- `TOY_FLASH_ATTN_CUDA_VERSION=v4`，或不设置
+- `TOY_FLASH_ATTN_CUDA_VERSION=v6`，或不设置
+  编译并加载 [v6/flash_attn_func.cu](/home/linf/code/cuda/flash_attention_backend/toy_flash_attn/v6/flash_attn_func.cu)。
+- `TOY_FLASH_ATTN_CUDA_VERSION=v4`
   编译并加载 [v4/flash_attn_func.cu](/home/linf/code/cuda/flash_attention_backend/toy_flash_attn/v4/flash_attn_func.cu)。
 - `TOY_FLASH_ATTN_CUDA_VERSION=v3`
   编译并加载 [flash_attn_func_v3.cu](/home/linf/code/cuda/flash_attention_backend/toy_flash_attn/flash_attn_func_v3.cu)。
@@ -58,6 +60,7 @@ CUDA 源文件版本由另一个环境变量控制，必须在 import `flash_att
 注意：
 
 - `TOY_FLASH_ATTN_USE=fp32` 只支持 `TOY_FLASH_ATTN_CUDA_VERSION=v4`。
+- 当前 `v6` 只导出 `flash_attn_varlen_with_block_v6_64`，默认验收应聚焦 `head_dim=64`。
 - v3 只导出 `flash_attn_varlen_with_block_v3`，不支持当前 v4 的 fp32 CUDA 入口。
 - 切换 `TOY_FLASH_ATTN_CUDA_VERSION` 后建议使用新的 Python 进程运行，避免已加载扩展复用旧版本。
 
@@ -336,7 +339,8 @@ python flash_attention_backend/toy_flash_attn/analyze_flash_attn_dumps.py \
   - `fp32`：v4 fp32 CUDA debug path
 - `TOY_FLASH_ATTN_CUDA_VERSION`
   选择编译/加载的 CUDA 源文件版本：
-  - `v4`：默认，加载 `v4/flash_attn_func.cu`
+  - `v6`：默认，加载 `v6/flash_attn_func.cu`
+  - `v4`：加载 `v4/flash_attn_func.cu`
   - `v3`：加载 `flash_attn_func_v3.cu`
 - `TOY_FLASH_ATTN_REPLAY_DUMP`
   replay 单测读取的 dump 路径。

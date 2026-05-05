@@ -141,7 +141,7 @@ def _check_gqa_heads(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: tor
         )
 
 
-_CUDA_IMPL_VERSION = os.environ.get("TOY_FLASH_ATTN_CUDA_VERSION", "v4").lower()
+_CUDA_IMPL_VERSION = os.environ.get("TOY_FLASH_ATTN_CUDA_VERSION", "v6").lower()
 if _CUDA_IMPL_VERSION == "v3":
     _ops = load(
         name="toy_torch_flash_attention_func_v3",
@@ -202,7 +202,7 @@ elif _CUDA_IMPL_VERSION == "v6":
     _ops.flash_attn_varlen_with_block_fp32fp32 = None
 else:
     raise ValueError(
-        "TOY_FLASH_ATTN_CUDA_VERSION must be either 'v3' or 'v4', "
+        "TOY_FLASH_ATTN_CUDA_VERSION must be one of 'v3', 'v4', 'v5', or 'v6', "
         f"got {_CUDA_IMPL_VERSION!r}"
     )
 
