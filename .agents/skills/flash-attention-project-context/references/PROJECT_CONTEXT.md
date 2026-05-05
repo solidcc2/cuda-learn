@@ -175,6 +175,7 @@ Important report rule:
 - Keep performance report updates version-extensible: derive the in-scope version set from current benchmark cases, JSON, logs, and source semantics instead of preserving stale report rows.
 - Standard performance reports should not include debug-on/debug-off overhead tables unless explicitly requested.
 - If `analysis/artifacts/e2e/perf_eval_results.json` reports `cuda_available: false` or logs show platform/device bootstrap failures, record the run as invalid for performance comparison instead of carrying forward older throughput tables.
+- `bench/common.py::system_environment()` now emits `git_commit` from `git rev-parse HEAD`; keep that field in report inputs, but do not overwrite previously verified GPU facts with a sandbox-only rebuild that reports `cuda_available: false`.
 
 ## Quick Verification Patterns
 

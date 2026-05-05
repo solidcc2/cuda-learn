@@ -4,6 +4,7 @@ import json
 import math
 import os
 import platform
+import subprocess
 import time
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass
@@ -174,6 +175,17 @@ def system_environment() -> dict[str, Any]:
         payload["vllm"] = getattr(vllm, "__version__", None)
     except Exception as exc:  # pragma: no cover - best effort metadata
         payload["vllm_error"] = str(exc)
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        payload["git_commit"] = result.stdout.strip()
+    except Exception as exc:  # pragma: no cover - best effort metadata
+        payload["git_commit_error"] = str(exc)
     return payload
 
 

@@ -39,7 +39,7 @@
 | CUDA toolkit | `12.8` |
 | `torch.cuda.is_available()` | `true` |
 | vLLM | `0.17.1` |
-| git commit | 未采集 |
+| git commit | `c8a742c0119dccab8275c259d8f0c180572d0342` |
 
 说明：
 
