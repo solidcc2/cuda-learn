@@ -202,7 +202,7 @@ def _summarize_version(case_name: str, version: str, input_dir: Path) -> dict[st
         try:
             return str(path.resolve().relative_to(cwd))
         except ValueError:
-            return str(path.resolve())
+            return path.name
 
     duration_ns = _row_number(kernel_row or {}, ["gpu__time_duration.sum", "gpu__time_duration.avg"])
     dram_bytes_per_s = _row_number(kernel_row or {}, ["dram__bytes.sum.per_second"])

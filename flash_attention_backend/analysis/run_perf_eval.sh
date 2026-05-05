@@ -35,7 +35,6 @@ NCU_DIR="${ARTIFACT_ROOT}/ncu"
 E2E_JSON_DIR="${E2E_DIR}/perf_json"
 E2E_LOG_DIR="${E2E_DIR}/perf_logs"
 E2E_OUTPUT="${E2E_DIR}/perf_eval_results.json"
-LEGACY_E2E_OUTPUT="${SCRIPT_DIR}/perf_eval_results.json"
 
 OP_CASE_DIR="${OP_DIR}/case_json"
 OP_LOG_DIR="${OP_DIR}/logs"
@@ -202,7 +201,6 @@ run_e2e() {
     PERF_EVAL_REPEAT="${REPEAT}" \
     PYTHON_BIN="${PYTHON_BIN}" \
     bash "${E2E_RUNNER}" "${suite}"
-  cp "${E2E_OUTPUT}" "${LEGACY_E2E_OUTPUT}"
   echo "[E2E] output=${E2E_OUTPUT}"
 }
 

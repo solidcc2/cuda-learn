@@ -18,6 +18,15 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def _safe_path(path: Path) -> str:
+    resolved = path.resolve()
+    cwd = Path.cwd().resolve()
+    try:
+        return str(resolved.relative_to(cwd))
+    except ValueError:
+        return resolved.name
+
+
 def main() -> None:
     args = parse_args()
     json_dir = args.json_dir.resolve()
@@ -31,7 +40,7 @@ def main() -> None:
         {
             "kind": "flash_attention_backend.e2e_summary",
             "environment": system_environment(),
-            "json_dir": str(json_dir),
+            "json_dir": _safe_path(json_dir),
             "benchmarks": entries,
         },
     )

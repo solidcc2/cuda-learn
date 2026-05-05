@@ -31,6 +31,15 @@ DTYPE_MAP = {
 }
 
 
+def _safe_path(path: Path) -> str:
+    resolved = path.resolve()
+    cwd = Path.cwd().resolve()
+    try:
+        return str(resolved.relative_to(cwd))
+    except ValueError:
+        return resolved.name
+
+
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--version", choices=sorted(VERSION_CONFIGS), required=True)
@@ -255,7 +264,7 @@ def main() -> None:
     print("tokens_per_s   =", payload["tokens_per_s"])
     if args.output_json is not None:
         write_json(args.output_json, payload)
-        print("output_json    =", args.output_json)
+        print("output_json    =", _safe_path(args.output_json))
 
 
 if __name__ == "__main__":

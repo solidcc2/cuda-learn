@@ -174,7 +174,7 @@ Important report rule:
 - If logs are stale or contain shell/runtime errors, do not treat parsed rows as valid performance data.
 - Keep performance report updates version-extensible: derive the in-scope version set from current benchmark cases, JSON, logs, and source semantics instead of preserving stale report rows.
 - Standard performance reports should not include debug-on/debug-off overhead tables unless explicitly requested.
-- If `perf_eval_results.json` reports `cuda_available: false` or logs show platform/device bootstrap failures, record the run as invalid for performance comparison instead of carrying forward older throughput tables.
+- If `analysis/artifacts/e2e/perf_eval_results.json` reports `cuda_available: false` or logs show platform/device bootstrap failures, record the run as invalid for performance comparison instead of carrying forward older throughput tables.
 
 ## Quick Verification Patterns
 

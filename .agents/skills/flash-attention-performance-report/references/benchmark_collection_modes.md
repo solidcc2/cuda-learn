@@ -7,7 +7,7 @@
 优先读取：
 
 1. `analysis/artifacts/report/report_inputs.json`
-2. `analysis/perf_eval_results.json`
+2. `analysis/artifacts/e2e/perf_eval_results.json`
 3. `analysis/` 下的原始日志
 
 只有当用户明确要求“刷新数据 / 重跑 / 重新采集”时，才运行 benchmark。
