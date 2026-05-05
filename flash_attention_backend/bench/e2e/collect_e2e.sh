@@ -16,7 +16,7 @@ REPEAT="${PERF_EVAL_REPEAT:-3}"
 usage() {
   cat <<'EOF'
 Usage:
-  run_perf_eval.sh [suite|case ...]
+  collect_e2e.sh [suite|case ...]
 
 Suites:
   smoke
@@ -69,9 +69,13 @@ run_case() {
   local base_name="${version}_${case_name}"
   local json_path="${JSON_DIR}/${base_name}.json"
   local log_path="${LOG_DIR}/${base_name}.log"
+  local started
+  local ended
+  local elapsed_s
 
   mkdir -p "${JSON_DIR}" "${LOG_DIR}"
   echo "[RUN] version=${version} case=${case_name}"
+  started="$(date +%s)"
   "${PYTHON_BIN}" "${RUNNER}" \
     --version "${version}" \
     --case "${case_name}" \
@@ -79,7 +83,9 @@ run_case() {
     --repeat "${REPEAT}" \
     --output-json "${json_path}" \
     >"${log_path}" 2>&1
-  echo "[DONE] version=${version} case=${case_name} json=${json_path}"
+  ended="$(date +%s)"
+  elapsed_s="$((ended - started))"
+  echo "[DONE] version=${version} case=${case_name} elapsed_s=${elapsed_s} json=${json_path}"
 }
 
 main() {

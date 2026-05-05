@@ -2,223 +2,316 @@
 
 ## 1. 评估范围
 
-本文档基于当前 benchmark 产物更新，只记录已验证的有效样本，不补推缺失结果。
-
-本次报告依据：
+本文档基于当前统一采集产物更新，数据来源为：
 
 - `analysis/run_perf_eval.sh`
-- `analysis/perf_eval_results.json`
-- `analysis/perf_logs/*.log`
+- `analysis/artifacts/report/report_inputs.json`
+- `analysis/artifacts/report/version_optimizations.json`
 
-当前 benchmark 脚本已纳入以下版本：
+本次报告使用的是当前统一入口生成的 `light` 级产物，因此覆盖范围是：
 
-| 版本 | 本次脚本状态 | 入口 |
+- `E2E Benchmark`：smoke 级 case
+- `Op Benchmark`：最小标准 case 集
+- `Correctness`：collect 模式摘要
+- `Profiling`：仅保留章节与状态，不包含实测 profiler 结果
+
+当前报告纳入的版本：
+
+| 版本 | 当前状态 | 说明 |
 | --- | --- | --- |
-| baseline | 已纳入 | `TOY_FLASH_ATTN_USE=reference` |
-| v4 | 已纳入 | `TOY_FLASH_ATTN_USE=bf16`，`TOY_FLASH_ATTN_CUDA_VERSION=v4` |
-| v5 | 已纳入 | `TOY_FLASH_ATTN_USE=bf16`，`TOY_FLASH_ATTN_CUDA_VERSION=v5` |
-| v6 | 已纳入 | `TOY_FLASH_ATTN_USE=bf16`，`TOY_FLASH_ATTN_CUDA_VERSION=v6` |
-| official | 已纳入 | `TOY_FLASH_ATTN_USE=official` |
+| baseline | 已采集 | Python reference paged path |
+| v5 | 已采集 | 自定义 CUDA paged path |
+| v6 | 已采集 | 自定义 CUDA paged path，当前默认 CUDA 实现 |
+| official | 已采集 | 官方 decoder 对照路径 |
 
-当前套件定义：
-
-- `smoke`：128 token，覆盖 `baseline / v4 / v5 / v6 / official`
-- `report`：512 token，覆盖 `v4 / v5 / v6 / official`
-- `stress`：2048 token，覆盖 `v4 / v5 / v6 / official`
+本次报告不再沿用历史 `v4` 表格数据作为当前主结果。
 
 ## 2. 测试环境
 
-环境信息来自当前 `perf_eval_results.json`。
+环境信息来自 `report_inputs.json`。
 
 | 项目 | 数值 |
 | --- | --- |
-| 数据生成时间 | 2026-04-30T10:45:50.501089+00:00 |
-| GPU | NVIDIA GeForce RTX 2050 |
-| Python | 3.10.12 |
-| PyTorch | 2.10.0+cu128 |
-| CUDA toolkit | 12.8 |
+| 平台 | `Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35` |
+| GPU | `NVIDIA GeForce RTX 4070 Ti SUPER` |
+| Python | `3.10.12` |
+| PyTorch | `2.10.0+cu128` |
+| CUDA toolkit | `12.8` |
 | `torch.cuda.is_available()` | `true` |
-| vLLM | 0.17.1 |
-| 测量 git commit | `d08a36aad054a95fed380144b0111b49f07f68b9` |
+| vLLM | `0.17.1` |
+| git commit | 未采集 |
 
-## 3. 功能边界
+说明：
 
-| 能力 | baseline | v4 | v5 | v6 | official |
-| --- | --- | --- | --- | --- | --- |
-| paged KV cache | 支持 | 支持 | 支持 | 支持 | 支持 |
-| varlen query | 支持 | 支持 | 支持 | 支持 | 支持 |
-| causal mask | 支持 | 支持 | 支持 | 支持 | 支持 |
-| sliding window | 支持 | 支持 | 支持 | 支持 | 支持 |
-| GQA | 支持 | 支持 | 支持 | 支持 | 支持 |
-| bf16 输入 | 支持 | 支持 | 支持 | 支持 | 支持 |
-| fp32 accumulator | PyTorch 行为 | 支持 | 支持 | 支持 | 官方实现内部策略 |
-| head_dim=64 | 支持 | 支持 | 支持 | 支持 | 支持 |
-| Tensor Core / MMA | 不适用 | 未使用 | WMMA | CuTe MMA | 官方实现内部策略 |
+- 当前结构化环境信息会记录 GPU 型号，但不会自动记录图形界面程序占用等运行时背景。
+- 当前报告不再直接复用旧的 RTX 2050 结果作为本轮绝对值比较基线。
 
-说明：本节描述当前源码能力边界，不等同于本次 benchmark 已对所有版本和 case 采集到有效性能数据。
+## 3. 能力与口径边界
 
-## 4. 正确性评估
+| 维度 | baseline | v5 | v6 | official |
+| --- | --- | --- | --- | --- |
+| paged KV path | 支持 | 支持 | 支持 | e2e 对照路径支持 |
+| varlen query | 支持 | 支持 | 支持 | 支持 |
+| causal mask | 支持 | 支持 | 支持 | 支持 |
+| sliding window | 支持 | 支持 | 支持 | 支持 |
+| GQA | 支持 | 支持 | 支持 | 支持 |
+| bf16 输入 | 支持 | 支持 | 支持 | 支持 |
+| 主 correctness 口径 | 支持 | 支持 | `head_dim=64` 主线 | 不按 paged-op 支持矩阵展开 |
+| op 比较口径 | paged | paged | paged | dense |
 
-本次 JSON 仅包含端到端生成 benchmark，没有独立数值对拍字段。
+当前报告中的比较边界：
 
-因此当前报告不填充：
+- `baseline`：Python / reference paged path
+- `v5 / v6`：自定义 CUDA paged path
+- `official`：当前 e2e 路径中的官方 decoder 对照；op 层当前仍应理解为 dense-path 对照，不写成与 paged-op 完全同构
 
-- `max abs diff`
-- `mean abs diff`
-- `pass rate`
+## 4. 版本实现与优化摘要
 
-## 5. 端到端性能评估
+本节来自 `analysis/artifacts/report/version_optimizations.json`，只记录代码可证实的实现差异。
 
-### 5.1 数据有效性口径
+### baseline
 
-仅当同时满足以下条件时，样本才计入正式性能表：
+- 版本定位：Python reference paged attention path
+- 相对上一版本的新增点：
+  - 作为 paged KV 语义与 correctness 对比的参考实现
+- 代码证据：
+  - `toy_flash_attn/flash_attention_func.py`
+  - `bench/common.py`
 
-- `success: true`
-- `input_toks_per_s` 与 `output_toks_per_s` 非空
-- `prompt_count == batch`
-- `generated_count == batch`
+### v4
 
-本次汇总：
+- 版本定位：第一版通过统一 wrapper 暴露的自定义 CUDA paged path
+- 相对上一版本的新增点：
+  - 注册 bf16 和 fp32 CUDA alias
+  - 底层实现位于 `toy_flash_attn/v4/`
+
+### v5
+
+- 版本定位：WMMA / Tensor Core 路径的自定义 CUDA paged path
+- 相对上一版本的新增点：
+  - 通过统一 bf16 CUDA wrapper 绑定 v5 kernel
+  - 底层实现切换到 `toy_flash_attn/v5/`
+
+### v6
+
+- 版本定位：基于 CuTe 的自定义 CUDA paged path
+- 相对上一版本的新增点：
+  - 当 `TOY_FLASH_ATTN_CUDA_VERSION` 未设置时，默认选择 v6
+  - 通过统一 bf16 CUDA wrapper 绑定 v6 kernel
+  - 当前导出的主 specialization 只有 `head_dim=64`
+
+### official
+
+- 版本定位：官方 FlashAttention decoder 对照路径
+- 相对上一版本的新增点：
+  - 使用官方 backend 配置而不是自定义 paged CUDA path
+  - 当前 op 层比较边界仍以 dense-path 对照理解
+
+## 5. Correctness And Numerical Stability
+
+当前 correctness 数据来自 collect 模式摘要，而不是 unittest hard fail gate。
+
+### 5.1 支持范围
+
+当前 `v6` collect 模式主线支持范围：
+
+| 路径 | 当前支持 |
+| --- | --- |
+| `with_block_cu` | `head_dim=64` |
+| `with_block_cu` 不纳入当前主线 | `head_dim=16/32` |
+
+对应摘要：
+
+- `cuda_impl_version = v6`
+- `supported_head_dims = [64]`
+- `unsupported_head_dims = [16, 32]`
+
+### 5.2 统计摘要
 
 | 指标 | 数值 |
 | --- | --- |
-| benchmark case 总数 | 25 |
-| 有效样本数 | 25 |
-| 无效样本数 | 0 |
+| overall status | `sensitive` |
+| pass count | `5` |
+| sensitive count | `1` |
+| unsupported count | `2` |
+| error count | `0` |
+| strict threshold | `atol=2e-3, rtol=2e-3` |
+| relaxed threshold | `atol=8e-3, rtol=8e-3` |
 
-### 5.2 Case 状态总览
+### 5.3 case 明细
 
-| 版本 | 模型 | batch | max_tokens | 状态 |
+| case | status | max abs diff | mean abs diff | 说明 |
 | --- | --- | --- | --- | --- |
-| baseline | qwen | 1 | 128 | 已采集 |
-| v4 | gpt2 | 1 | 128 | 已采集 |
-| v4 | qwen | 1 | 128 | 已采集 |
-| v4 | qwen | 4 | 128 | 已采集 |
-| v4 | qwen | 1 | 512 | 已采集 |
-| v4 | qwen | 4 | 512 | 已采集 |
-| v4 | qwen | 1 | 2048 | 已采集 |
-| v5 | gpt2 | 1 | 128 | 已采集 |
-| v5 | qwen | 1 | 128 | 已采集 |
-| v5 | qwen | 4 | 128 | 已采集 |
-| v5 | qwen | 1 | 512 | 已采集 |
-| v5 | qwen | 4 | 512 | 已采集 |
-| v5 | qwen | 1 | 2048 | 已采集 |
-| v6 | gpt2 | 1 | 128 | 已采集 |
-| v6 | qwen | 1 | 128 | 已采集 |
-| v6 | qwen | 4 | 128 | 已采集 |
-| v6 | qwen | 1 | 512 | 已采集 |
-| v6 | qwen | 4 | 512 | 已采集 |
-| v6 | qwen | 1 | 2048 | 已采集 |
-| official | gpt2 | 1 | 128 | 已采集 |
-| official | qwen | 1 | 128 | 已采集 |
-| official | qwen | 4 | 128 | 已采集 |
-| official | qwen | 1 | 512 | 已采集 |
-| official | qwen | 4 | 512 | 已采集 |
-| official | qwen | 1 | 2048 | 已采集 |
+| `fa2_without_block_full` | `pass` | `0.0009766` | `0.0001123` | dense 对 official FA2 |
+| `fa2_with_block_full` | `pass` | `0.0009766` | `0.0001123` | paged 对 official FA2 |
+| `paged_kv_block_table_mapping` | `pass` | `0.0009766` | `0.0001019` | paged block table 语义 |
+| `paged_kv_local_causal_window` | `pass` | `0.0019531` | `0.0000867` | paged local+causal |
+| `cuda_with_block_cu_head_dim_16` | `unsupported` | 不适用 | 不适用 | 当前 `v6` 主线不支持 |
+| `cuda_with_block_cu_head_dim_32` | `unsupported` | 不适用 | 不适用 | 当前 `v6` 主线不支持 |
+| `cuda_with_block_cu_head_dim_64_minimal` | `pass` | `0.0000000` | `0.0000000` | `v6 + hd64` 最小 smoke |
+| `cuda_with_block_cu_head_dim_64_sensitive` | `sensitive` | `0.0078125` | `0.0010326` | strict 不过，relaxed 可接受 |
 
-### 5.3 有效性能样本
+当前结论：
 
-| 模型 | 版本 | batch | max_tokens | input toks/s | output toks/s | output toks/s/request | wall time |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| GPT-2 | official | 1 | 128 | 19.13 | 306.06 | 306.06 | 未采集 |
-| GPT-2 | v4 | 1 | 128 | 3.51 | 56.19 | 56.19 | 2.28s |
-| GPT-2 | v5 | 1 | 128 | 10.26 | 164.13 | 164.13 | 未采集 |
-| GPT-2 | v6 | 1 | 128 | 10.38 | 166.10 | 166.10 | 未采集 |
-| Qwen2.5-0.5B-Instruct | baseline | 1 | 128 | 1.19 | 19.04 | 19.04 | 6.72s |
-| Qwen2.5-0.5B-Instruct | official | 1 | 128 | 5.32 | 85.19 | 85.19 | 1.50s |
-| Qwen2.5-0.5B-Instruct | v4 | 1 | 128 | 1.54 | 24.68 | 24.68 | 5.19s |
-| Qwen2.5-0.5B-Instruct | v5 | 1 | 128 | 3.62 | 57.85 | 57.85 | 2.21s |
-| Qwen2.5-0.5B-Instruct | v6 | 1 | 128 | 3.63 | 58.05 | 58.05 | 2.21s |
-| Qwen2.5-0.5B-Instruct | official | 4 | 128 | 21.01 | 313.36 | 78.34 | 1.54s |
-| Qwen2.5-0.5B-Instruct | v4 | 4 | 128 | 3.98 | 59.98 | 14.99 | 2.13s |
-| Qwen2.5-0.5B-Instruct | v5 | 4 | 128 | 13.60 | 204.75 | 51.19 | 2.50s |
-| Qwen2.5-0.5B-Instruct | v6 | 4 | 128 | 14.39 | 216.70 | 54.17 | 2.36s |
-| Qwen2.5-0.5B-Instruct | official | 1 | 512 | 1.36 | 85.54 | 85.54 | 5.89s |
-| Qwen2.5-0.5B-Instruct | v4 | 1 | 512 | 0.19 | 12.08 | 12.08 | 41.72s |
-| Qwen2.5-0.5B-Instruct | v5 | 1 | 512 | 0.82 | 51.48 | 51.48 | 9.79s |
-| Qwen2.5-0.5B-Instruct | v6 | 1 | 512 | 0.84 | 53.18 | 53.18 | 9.48s |
-| Qwen2.5-0.5B-Instruct | official | 4 | 512 | 5.40 | 267.12 | 66.78 | 1.58s |
-| Qwen2.5-0.5B-Instruct | v4 | 4 | 512 | 0.45 | 22.22 | 5.55 | 18.90s |
-| Qwen2.5-0.5B-Instruct | v5 | 4 | 512 | 2.83 | 167.38 | 41.84 | 3.01s |
-| Qwen2.5-0.5B-Instruct | v6 | 4 | 512 | 3.03 | 179.41 | 44.85 | 2.81s |
-| Qwen2.5-0.5B-Instruct | official | 1 | 2048 | 1.36 | 85.45 | 85.45 | 5.90s |
-| Qwen2.5-0.5B-Instruct | v4 | 1 | 2048 | 0.19 | 12.11 | 12.11 | 41.63s |
-| Qwen2.5-0.5B-Instruct | v5 | 1 | 2048 | 0.82 | 51.78 | 51.78 | 9.73s |
-| Qwen2.5-0.5B-Instruct | v6 | 1 | 2048 | 0.84 | 52.63 | 52.63 | 9.58s |
+- collect 模式下没有结构性错误
+- `v6 + head_dim=64` 主线可以进入性能分析
+- `head_dim=16/32` 当前应明确视为 `unsupported`
 
-### 5.4 本次有效结果摘要
+## 6. E2E Benchmark
+
+本节使用 smoke 级 e2e 结果，共 12 个样本。
+
+### 6.1 Case 覆盖
+
+| case | 版本覆盖 |
+| --- | --- |
+| `gpt2_b1_t128` | baseline / v5 / v6 / official |
+| `qwen_b1_t128` | baseline / v5 / v6 / official |
+| `qwen_b4_t128` | baseline / v5 / v6 / official |
+
+统一运行参数：
+
+- `prompt_len = 256`
+- `max_tokens = 128`
+- `warmup = 1`
+- `repeat = 3`
+
+### 6.2 样本明细
+
+| case | 版本 | path | output toks/s | avg latency |
+| --- | --- | --- | --- | --- |
+| `gpt2_b1_t128` | baseline | paged | `3.91` | `32777.59 ms` |
+| `gpt2_b1_t128` | v5 | paged | `104.93` | `1219.92 ms` |
+| `gpt2_b1_t128` | v6 | paged | `106.39` | `1203.17 ms` |
+| `gpt2_b1_t128` | official | dense | `742.97` | `172.28 ms` |
+| `qwen_b1_t128` | baseline | paged | `1.78` | `72109.61 ms` |
+| `qwen_b1_t128` | v5 | paged | `54.73` | `2338.77 ms` |
+| `qwen_b1_t128` | v6 | paged | `54.66` | `2341.74 ms` |
+| `qwen_b1_t128` | official | dense | `309.22` | `413.95 ms` |
+| `qwen_b4_t128` | baseline | paged | `1.85` | `276716.26 ms` |
+| `qwen_b4_t128` | v5 | paged | `213.26` | `2400.82 ms` |
+| `qwen_b4_t128` | v6 | paged | `214.61` | `2385.73 ms` |
+| `qwen_b4_t128` | official | dense | `1216.80` | `420.78 ms` |
+
+### 6.3 E2E 摘要
 
 | 对比项 | 结果 |
 | --- | --- |
-| baseline Qwen batch=1 decode, 128 token | 19.04 toks/s |
-| v4 相比 baseline，Qwen batch=1 decode, 128 token | v4 为 24.68 toks/s，约为 baseline 的 1.30 倍 |
-| v5 相比 v4，Qwen batch=1 decode, 128 token | v5 为 57.85 toks/s，约为 v4 的 2.34 倍 |
-| v6 相比 v5，Qwen batch=1 decode, 128 token | v6 为 58.05 toks/s，约为 v5 的 1.00 倍 |
-| official 相比 v6，Qwen batch=1 decode, 128 token | official 为 85.19 toks/s，约为 v6 的 1.47 倍 |
-| v5 相比 v4，Qwen batch=4 decode, 128 token | v5 为 204.75 toks/s，约为 v4 的 3.41 倍 |
-| v6 相比 v5，Qwen batch=4 decode, 128 token | v6 为 216.70 toks/s，约为 v5 的 1.06 倍 |
-| official 相比 v6，Qwen batch=4 decode, 128 token | official 为 313.36 toks/s，约为 v6 的 1.45 倍 |
-| v5 相比 v4，Qwen batch=4 decode, 512 token | v5 为 167.38 toks/s，约为 v4 的 7.53 倍 |
-| v6 相比 v5，Qwen batch=4 decode, 512 token | v6 为 179.41 toks/s，约为 v5 的 1.07 倍 |
-| official 相比 v6，Qwen batch=4 decode, 512 token | official 为 267.12 toks/s，约为 v6 的 1.49 倍 |
-| v6 相比 v5，Qwen batch=1 decode, 2048 token | v6 为 52.63 toks/s，约为 v5 的 1.02 倍 |
-| official 相比 v6，Qwen batch=1 decode, 2048 token | official 为 85.45 toks/s，约为 v6 的 1.62 倍 |
-| v5 相比 v4，GPT-2 batch=1 decode, 128 token | v5 为 164.13 toks/s，约为 v4 的 2.92 倍 |
-| v6 相比 v5，GPT-2 batch=1 decode, 128 token | v6 为 166.10 toks/s，约为 v5 的 1.01 倍 |
-| official 相比 v6，GPT-2 batch=1 decode, 128 token | official 为 306.06 toks/s，约为 v6 的 1.84 倍 |
+| `qwen_b1_t128`：`v6 / v5` | `1.00x` |
+| `qwen_b1_t128`：`official / v6` | `5.66x` |
+| `qwen_b4_t128`：`v6 / v5` | `1.01x` |
+| `qwen_b4_t128`：`official / v6` | `5.67x` |
+| `gpt2_b1_t128`：`v6 / v5` | `1.01x` |
+| `gpt2_b1_t128`：`official / v6` | `6.98x` |
 
-## 6. 版本分析
+当前观察：
 
-### 6.1 baseline
+- `v5` 和 `v6` 在 e2e smoke 上非常接近
+- `official` 在当前环境下明显快于自定义 paged 路径
+- `baseline` 在 e2e 上极慢，尤其 `qwen_b4_t128`，不适合作为默认轻量模式的重 case
 
-- 本次 baseline 只有 `qwen / batch=1 / 128 token` 一个样本。
-- decode 吞吐为 19.04 toks/s。
-- baseline 仍主要用于 reference 和语义对拍，不作为性能目标。
+## 7. Op Benchmark
 
-### 6.2 v4
+本节使用 light 模式下的 12 个 op 样本。
 
-- v4 本轮 6 个 case 全部有效。
-- Qwen 上：
-  - `batch=1` 时，128/512/2048 token 的 decode 吞吐分别为 24.68 / 12.08 / 12.11 toks/s。
-  - `batch=4` 时，128/512 token 的 decode 吞吐分别为 59.98 / 22.22 toks/s。
-- 相比 v5/v6/official，v4 在中长序列上的差距仍然很大，尤其是 512 和 2048 token。
+### 7.1 Case 覆盖
 
-### 6.3 v5
+| case | 版本覆盖 |
+| --- | --- |
+| `gpt2_like_b1_s128_h64` | baseline / v5 / v6 / official |
+| `gqa_case_b1_s128` | baseline / v5 / v6 / official |
+| `qwen_like_b1_s128_h64` | baseline / v5 / v6 / official |
 
-- v5 本轮 6 个 case 全部有效，是完整的自定义 backend 基线。
-- Qwen 上：
-  - `batch=1` 时，128/512/2048 token 的 decode 吞吐分别为 57.85 / 51.48 / 51.78 toks/s。
-  - `batch=4` 时，128/512 token 的 decode 吞吐分别为 204.75 / 167.38 toks/s。
-- GPT-2 `batch=1 / 128 token` 的 decode 吞吐为 164.13 toks/s。
+### 7.2 样本明细
 
-### 6.4 v6
+| case | 版本 | path | avg ms | tokens/s |
+| --- | --- | --- | --- | --- |
+| `gpt2_like_b1_s128_h64` | baseline | paged | `6.4115` | `155.97` |
+| `gpt2_like_b1_s128_h64` | v5 | paged | `0.0849` | `11779.49` |
+| `gpt2_like_b1_s128_h64` | v6 | paged | `0.0772` | `12960.14` |
+| `gpt2_like_b1_s128_h64` | official | dense | `0.8571` | `1166.73` |
+| `gqa_case_b1_s128` | baseline | paged | `6.1665` | `162.17` |
+| `gqa_case_b1_s128` | v5 | paged | `0.0764` | `13095.29` |
+| `gqa_case_b1_s128` | v6 | paged | `0.0769` | `13011.46` |
+| `gqa_case_b1_s128` | official | dense | `0.0583` | `17142.56` |
+| `qwen_like_b1_s128_h64` | baseline | paged | `5.5660` | `179.66` |
+| `qwen_like_b1_s128_h64` | v5 | paged | `0.1178` | `8489.11` |
+| `qwen_like_b1_s128_h64` | v6 | paged | `0.0942` | `10612.29` |
+| `qwen_like_b1_s128_h64` | official | dense | `0.0974` | `10262.76` |
 
-- v6 本轮 6 个 case 全部有效。
-- Qwen 上：
-  - `batch=1` 时，128/512/2048 token 的 decode 吞吐分别为 58.05 / 53.18 / 52.63 toks/s。
-  - `batch=4` 时，128/512 token 的 decode 吞吐分别为 216.70 / 179.41 toks/s。
-- GPT-2 `batch=1 / 128 token` 的 decode 吞吐为 166.10 toks/s。
-- 相比 v5，v6 在当前有效样本上是稳定小幅领先：
-  - Qwen `batch=1 / 128 token`：1.00 倍
-  - Qwen `batch=4 / 128 token`：1.06 倍
-  - Qwen `batch=4 / 512 token`：1.07 倍
-  - Qwen `batch=1 / 2048 token`：1.02 倍
-  - GPT-2 `batch=1 / 128 token`：1.01 倍
+### 7.3 Op 摘要
 
-### 6.5 official
+| 对比项 | 结果 |
+| --- | --- |
+| `qwen_like_b1_s128_h64`：`v6 / v5` | `1.25x` |
+| `qwen_like_b1_s128_h64`：`official / v6` | `0.97x` |
+| `gpt2_like_b1_s128_h64`：`v6 / v5` | `1.10x` |
+| `gpt2_like_b1_s128_h64`：`official / v6` | `0.09x` |
+| `gqa_case_b1_s128`：`v6 / v5` | `0.99x` |
+| `gqa_case_b1_s128`：`official / v6` | `1.32x` |
 
-- official 本轮 6 个 case 全部有效。
-- Qwen 上：
-  - `batch=1` 时，128/512/2048 token 的 decode 吞吐分别为 85.19 / 85.54 / 85.45 toks/s。
-  - `batch=4` 时，128/512 token 的 decode 吞吐分别为 313.36 / 267.12 toks/s。
-- GPT-2 `batch=1 / 128 token` 的 decode 吞吐为 306.06 toks/s。
-- 当前所有可比 case 上，official 都明显快于 v4/v5/v6。
+当前观察：
 
-## 7. 结论
+- op 层并不呈现与 e2e 同样巨大的 `official / v6` 差距
+- `qwen_like_b1_s128_h64` 上，`v6` 已接近 `official`
+- `gqa_case_b1_s128` 上，`official` 仍快于 `v6`
+- `gpt2_like_b1_s128_h64` 上，当前 `official` dense 路径结果明显不同于 paged 路径，说明 comparison boundary 仍需谨慎解释
 
-本轮 benchmark 的主要结论是：
+## 8. Profiling
 
-1. `baseline / v4 / v5 / v6 / official` 全部目标 case 都已采集到有效数据。
-2. `v6` 在本轮所有与 `v5` 可比的有效样本上都略快，但提升幅度普遍较小，约在 1.00 到 1.07 倍之间。
-3. `v5` 到 `v6` 的提升主要体现在 Qwen 的 batch=4 case，尤其是 128 和 512 token。
-4. `official` 仍是当前性能上界，在所有可比 case 上都显著快于 `v6`。
+当前状态：`未采集`
+
+原因：
+
+- 统一入口默认不会执行 profiler
+- 当前只建立了稳定 profiling 入口，而没有自动生成 profiler 结果
+
+当前已具备的 profiling 入口：
+
+- `bench/op/profile_attention_op.py`
+
+本节的职责是：
+
+- 固定 `version`
+- 固定 `case`
+- 固定输入元数据
+- 为后续 `ncu` / kernel 级分析提供稳定复现入口
+
+它不属于默认性能采集的一部分，所以当前报告应明确写 `未采集`，而不是伪造 profiling 结论。
+
+## 9. 版本分析
+
+### baseline
+
+- e2e 明显极慢，尤其 `qwen_b4_t128`
+- op 层主要用于 reference / 语义对照，不是性能目标
+
+### v5
+
+- 已经明显快于 baseline
+- e2e 上是当前自定义 paged 路径的稳定基线
+- op 层在三类 case 上都进入了亚毫秒级到低毫秒级
+
+### v6
+
+- 当前默认 CUDA 实现是 `v6`
+- correctness collect 模式主线已明确收敛到 `head_dim=64`
+- e2e 上只比 `v5` 小幅领先
+- op 层在 `qwen_like_b1_s128_h64` 上相对 `v5` 有更明显优势
+
+### official
+
+- e2e 上仍是当前 smoke 样本的明显上界
+- op 层和 `v6` 的差距不总是大，说明 e2e 差距不应直接等同于单 kernel 差距
+- 当前仍应把它理解为对照路径，而不是与 paged-op 完全同构的单接口基线
+
+## 10. 分层结论
+
+1. 当前统一采集链已经可以同时产出 `e2e`、`op`、`correctness` 和 `version summary` 的结构化输入。
+2. correctness 已从 hard fail gate 收敛为 collect 模式：
+   - `v6 + head_dim=64` 主线可用于后续性能分析
+   - `head_dim=16/32` 当前应视为 `unsupported`
+   - `head_dim=64` 敏感 case 当前表现为 `sensitive`，不是结构性错误
+3. e2e smoke 上，`v5` 和 `v6` 基本持平，而 `official` 仍明显快于两者。
+4. op 层结果显示，`v6` 并非在所有单接口 case 上都远落后于 `official`；因此 e2e 差距不能直接归因为单 kernel 算力不足。
+5. profiling 章节当前仍是 `未采集`，后续要依赖 `profile_attention_op.py` 和外部 profiler 数据补全 kernel 级瓶颈结论。

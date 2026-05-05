@@ -1,6 +1,6 @@
 interface:
-  display_name: "Flash Attention Performance Report"
-  short_description: "Update benchmark report from JSON logs"
-  default_prompt: "Use $flash-attention-performance-report to update the performance report from benchmark results."
+  display_name: "Flash Attention 性能报告"
+  short_description: "默认用现有产物更新报告，可按要求跑轻量或全量 bench"
+  default_prompt: "使用 $flash-attention-performance-report：默认基于现有 benchmark 产物更新性能报告；只有我明确要求刷新数据时，才运行轻量或全量 benchmark。"
 policy:
   allow_implicit_invocation: true

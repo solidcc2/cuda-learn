@@ -20,8 +20,8 @@ It is a navigation map, not a source of truth. Before giving conclusions or maki
 
 | Field | Value |
 | --- | --- |
-| last_verified_commit | `d08a36aad054a95fed380144b0111b49f07f68b9` |
-| refresh_scope | Incremental refresh for v6 benchmark integration, benchmark suite workflow, and current perf-report runtime state. |
+| last_verified_commit | `aa5e8a195d503cc54425fe71c6b601e66ae49e36` |
+| refresh_scope | Incremental refresh for default CUDA version semantics, stage-3 correctness smoke gating, and unified analysis collection entry semantics. |
 
 When current `git rev-parse HEAD` differs from `last_verified_commit`, refresh this map before relying on it.
 
@@ -41,7 +41,8 @@ Refresh mode:
 | v3 CUDA kernel | Older CUDA implementation | `flash_attention_backend/toy_flash_attn/flash_attn_func_v3.cu` |
 | vLLM smoke runner | End-to-end generation entrypoint | `flash_attention_backend/test_self_flash_attn_backend.py` |
 | CuTe torch extension demo | PyTorch JIT extension examples for learning CuTe tensor/layout/tile concepts plus a small SM80 MMA GEMM path | `flash_attention_backend/test/test_cute_torch_extension.py`, `flash_attention_backend/test/cute_bias_add_kernel.cu`, `flash_attention_backend/test/cute_mma_gemm_kernel.cu` |
-| benchmark analysis | Shell orchestration, log parser, JSON output | `flash_attention_backend/analysis/run_perf_eval.sh`, `flash_attention_backend/analysis/parse_perf_eval_logs.py` |
+| benchmark entrypoints | Unified analysis collection shell plus e2e sub-entrypoints | `flash_attention_backend/analysis/run_perf_eval.sh`, `flash_attention_backend/bench/e2e/collect_e2e.sh`, `flash_attention_backend/bench/e2e/parse_perf_eval_logs.py`, `flash_attention_backend/bench/e2e/run_vllm_e2e.py` |
+| analysis aggregators | Structured report-input, version-summary, and correctness-metrics helpers | `flash_attention_backend/analysis/build_report_inputs.py`, `flash_attention_backend/analysis/summarize_version_optimizations.py`, `flash_attention_backend/analysis/collect_correctness_metrics.py` |
 | performance report | Human-facing benchmark report | `flash_attention_backend/docs/PERFORMANCE_EVAL.md` |
 | performance report skill | Report-update workflow | `.agents/skills/flash-attention-performance-report/SKILL.md` |
 
@@ -51,15 +52,21 @@ Verify these in code before relying on them.
 
 | Variable | Current role | Primary files to check |
 | --- | --- | --- |
-| `TOY_FLASH_ATTN_USE` | Selects reference / bf16 / fp32 path in wrapper; selects official / custom backend in smoke runner; used by benchmark shell cases | `toy_flash_attn/flash_attention_func.py`, `test_self_flash_attn_backend.py`, `analysis/run_perf_eval.sh` |
-| `TOY_FLASH_ATTN_CUDA_VERSION` | Selects v3, v4, v5, or v6 extension at import time | `toy_flash_attn/flash_attention_func.py`, `analysis/run_perf_eval.sh`, `toy_flash_attn/README.md` |
+| `TOY_FLASH_ATTN_USE` | Selects reference / bf16 / fp32 path in wrapper; selects official / custom backend in smoke runner; shell collection entrypoints may propagate it to subcommands | `toy_flash_attn/flash_attention_func.py`, `test_self_flash_attn_backend.py`, `bench/e2e/collect_e2e.sh`, `analysis/run_perf_eval.sh` |
+| `TOY_FLASH_ATTN_CUDA_VERSION` | Selects v3, v4, v5, or v6 extension at import time; may be inherited by benchmark shell entrypoints | `toy_flash_attn/flash_attention_func.py`, `bench/e2e/collect_e2e.sh`, `analysis/run_perf_eval.sh`, `toy_flash_attn/README.md` |
 | `TOY_FLASH_ATTN_DEBUG` | Prints wrapper input tensor metadata | `toy_flash_attn/flash_attention_func.py` |
 | `TOY_FLASH_ATTN_PRINT_DTYPE` | Prints Python reference dtype trace | `toy_flash_attn/flash_attention_func.py` |
 | `TOY_FLASH_ATTN_DUMP_DIR` | Dumps attention context for replay/debug | `toy_flash_attn/flash_attention_func.py`, `toy_flash_attn/README.md` |
 | `TOY_FLASH_ATTN_REPLAY_DUMP` | Replay-test input path | `toy_flash_attn/README.md`, tests |
-| `PERF_EVAL_LOG_DIR` | Overrides benchmark log directory | `analysis/run_perf_eval.sh` |
-| `PERF_EVAL_OUTPUT` | Overrides benchmark JSON output path | `analysis/run_perf_eval.sh` |
-| `PYTHON_BIN` | Selects Python executable for benchmark shell | `analysis/run_perf_eval.sh` |
+| `PERF_EVAL_LOG_DIR` | Overrides benchmark log directory for the e2e sub-entrypoint | `bench/e2e/collect_e2e.sh`, `analysis/run_perf_eval.sh` |
+| `PERF_EVAL_OUTPUT` | Overrides benchmark JSON output path for the e2e sub-entrypoint | `bench/e2e/collect_e2e.sh`, `analysis/run_perf_eval.sh` |
+| `PERF_EVAL_JSON_DIR` | Overrides per-case benchmark JSON directory for the e2e sub-entrypoint | `bench/e2e/collect_e2e.sh`, `analysis/run_perf_eval.sh` |
+| `PERF_EVAL_WARMUP` | Overrides shell warmup count | `bench/e2e/collect_e2e.sh`, `analysis/run_perf_eval.sh` |
+| `PERF_EVAL_REPEAT` | Overrides shell repeat count | `bench/e2e/collect_e2e.sh`, `analysis/run_perf_eval.sh` |
+| `PERF_EVAL_ARTIFACT_DIR` | Overrides unified analysis artifact root | `analysis/run_perf_eval.sh` |
+| `PERF_EVAL_OP_WARMUP` | Overrides op benchmark warmup count in unified analysis collection | `analysis/run_perf_eval.sh` |
+| `PERF_EVAL_OP_ITERS` | Overrides op benchmark iteration count in unified analysis collection | `analysis/run_perf_eval.sh` |
+| `PYTHON_BIN` | Selects Python executable for benchmark shell | `bench/e2e/collect_e2e.sh`, `analysis/run_perf_eval.sh` |
 
 ## Backend Selection Dependency
 
@@ -68,6 +75,7 @@ When changing backend selection, check all of:
 - `flash_attention_backend/toy_flash_attn/flash_attention_func.py`
 - `flash_attention_backend/test_self_flash_attn_backend.py`
 - `flash_attention_backend/analysis/run_perf_eval.sh`
+- `flash_attention_backend/bench/e2e/collect_e2e.sh`
 - `flash_attention_backend/toy_flash_attn/README.md`
 - `flash_attention_backend/docs/PERFORMANCE_EVAL.md`
 - `.agents/skills/flash-attention-performance-report/SKILL.md`
@@ -88,16 +96,18 @@ When changing v3/v4/v5/v6 loading or op aliases, check:
 - v3, v4, and v5 op names exported by CUDA bindings;
 - wrapper calls using `_ops.flash_attn_varlen_with_block_bf16fp32`;
 - fp32 wrapper availability check;
-- benchmark case mapping in `analysis/run_perf_eval.sh`;
+- benchmark case mapping in `bench/e2e/collect_e2e.sh`;
+- unified collection mode and artifact layout in `analysis/run_perf_eval.sh`;
 - README wording.
 
 Current facts to verify before use:
 
-- default CUDA implementation version is `v4`;
+- default CUDA implementation version is `v6`;
 - v3 registers only bf16 alias and has no fp32 op alias;
 - v4 registers bf16 and fp32 op aliases.
 - v5 registers bf16 WMMA aliases for supported head-dim specializations; verify current exported op names before use.
-- v6 is loadable through the same wrapper path and is benchmark-selectable via `TOY_FLASH_ATTN_CUDA_VERSION=v6`; verify exported op names before documenting specialization coverage.
+- v6 is loadable through the same wrapper path and is now the default when `TOY_FLASH_ATTN_CUDA_VERSION` is unset.
+- v6 currently exports only `flash_attn_varlen_with_block_v6_64`; `head_dim=16/32` should not be treated as supported v6 smoke coverage.
 
 ## v4 Kernel Dependency
 
@@ -133,9 +143,13 @@ When changing GQA, check:
 Benchmark workflow files:
 
 - `flash_attention_backend/analysis/run_perf_eval.sh`
+- `flash_attention_backend/analysis/build_report_inputs.py`
+- `flash_attention_backend/analysis/summarize_version_optimizations.py`
+- `flash_attention_backend/analysis/collect_correctness_metrics.py`
+- `flash_attention_backend/bench/e2e/collect_e2e.sh`
+- `flash_attention_backend/bench/e2e/parse_perf_eval_logs.py`
+- `flash_attention_backend/bench/e2e/run_vllm_e2e.py`
 - `flash_attention_backend/analysis/parse_perf_eval_logs.py`
-- `flash_attention_backend/analysis/perf_eval_results.json`
-- `flash_attention_backend/analysis/perf_logs/*.log`
 
 Report workflow files:
 
@@ -144,8 +158,10 @@ Report workflow files:
 
 When changing benchmark cases or output fields, check:
 
-- default cases and named suites in `run_perf_eval.sh`;
-- case filename convention expected by `parse_perf_eval_logs.py`;
+- default cases and named suites in `bench/e2e/collect_e2e.sh`;
+- op case list in `bench/op/cases_op.py`;
+- unified artifact layout emitted by `analysis/run_perf_eval.sh`;
+- report-input schema generated by `analysis/build_report_inputs.py`;
 - JSON fields consumed by performance report;
 - report tables and summary math.
 
