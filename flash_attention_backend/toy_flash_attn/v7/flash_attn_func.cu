@@ -396,7 +396,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
         );
 
         cute::TiledCopy copy_a = cute::make_tiled_copy(
-            cute::Copy_Atom<cute::UniversalCopy<cute::uint128_t>, scalar_t>{},
+            cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>, scalar_t>{},
             thr_layout, val_layout
         );
         if (threadIdx.x < cute::size(copy_a)) {
@@ -413,8 +413,8 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
             }
             cute::fill(dst, scalar_t{0});
             cute::copy_if(pred, src, dst);
+            cute::cp_async_fence();
         }
-        __syncthreads();
     }
 
     for(int64_t kv_chunk_id = kv_chunk_end - 1;
@@ -464,6 +464,10 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                     sTensor_v_t(head_off, seq_off) = scalar_t{0}; 
                 }  
             }
+            __syncthreads();
+        }
+        {
+            cute::cp_async_wait<0>();   // Q就绪
             __syncthreads();
         }
         {   // QK matmul use mma

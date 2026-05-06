@@ -14,6 +14,11 @@
 8. 浮点0乘法，可能会因为无关数值，引入正负0,如果为了严格数值对拍和稳定性，最好不要依赖数值计算带来的路径选择，包括+/-inf, +/-0
 
 ## Dev Log
+### 20260506
+1. v7开始，重新定义了QKV约束，尽量将依赖约束（不变式）变单向。
+2. v7 Q chunk改为tiled copy并异步
+3. v7接入bench流程。
+
 ### 20260505
 1. AI重构了当前的bench & test & analysis架构。拆成e2e & op & correctness & ncu perf分类bench & 报告。
 2. ncu进行一轮v6和official对照分析，现有问题：
