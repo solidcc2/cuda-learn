@@ -1,5 +1,4 @@
 
-#include <__clang_cuda_builtin_vars.h>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -12,22 +11,17 @@
 #include <torch/headeronly/util/BFloat16.h>
 #include <type_traits>
 
-#include "cute/algorithm/copy.hpp"
-#include "cute/arch/copy.hpp"
 #include "cute/arch/mma_sm80.hpp"
-#include "cute/atom/copy_atom.hpp"
+#include "cutlass/fast_math.h"
 #include "cute/atom/mma_atom.hpp"
 #include "cute/container/array_subbyte.hpp"
 #include "cute/int_tuple.hpp"
 #include "cute/layout.hpp"
 #include "cute/numeric/integral_constant.hpp"
-#include "cute/numeric/numeric_types.hpp"
 #include "cute/pointer.hpp"
 #include "cute/pointer_flagged.hpp"
 #include "cute/stride.hpp"
 #include "cute/tensor_impl.hpp"
-#include "cutlass/fast_math.h"
-#include "cutlass/uint128.h"
 #include "helper.h"
 
 template<typename scalar_t, typename inner_scalar_t, int Q_CHUNK_SIZE, int KV_CHUNK_SIZE, int HEAD_DIM_STRIDE>
@@ -281,13 +275,13 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
     extern __shared__ char smem[];
     TileLayout layout = TileLayout::builder(smem, param);
 
-    toy_flash_attn_assert(blockDim.x == thread_block_size);
+    toy_flash_attn_assert(blockDim.x == THR_NUM);
     toy_flash_attn_assert(Q_CHUNK_SIZE % MMA_M == 0);
     toy_flash_attn_assert(KV_CHUNK_SIZE % cutlass::const_max(MMA_N, MMA_K) == 0);
 
-    toy_flash_attn_assert((thread_block_size & (thread_block_size - 1)) == 0);  // 2 的幂
+    toy_flash_attn_assert((THR_NUM & (THR_NUM - 1)) == 0);  // 2 的幂
 
-    toy_flash_attn_assert(head_dim_stride==round_up(param.head_dim, cutlass::const_max(MMA_N, MMA_K)));
+    toy_flash_attn_assert(HEAD_DIM_STRIDE==round_up(param.head_dim, cutlass::const_max(MMA_N, MMA_K)));
 
     const inner_scalar_t softmax_scale_log2 = M_LOG2Ef32 / sqrt((double)param.head_dim);
 
@@ -520,8 +514,8 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
         {   // online softmax
 
             // 先warp归约求chunk max & sum
-            toy_flash_attn_assert(thread_block_size >= KV_CHUNK_SIZE);
-            toy_flash_attn_assert(thread_block_size % WARP_SIZE == 0);
+            toy_flash_attn_assert(THR_NUM >= KV_CHUNK_SIZE);
+            toy_flash_attn_assert(THR_NUM % WARP_SIZE == 0);
             toy_flash_attn_assert(KV_CHUNK_SIZE % WARP_SIZE == 0);
             for(int linear=threadIdx.x; linear<cute::size(sTensor_score); linear += THR_NUM) {
                 // auto coord = cute::idx2crd(linear, cute::Shape<cute::Int<KV_CHUNK_SIZE>, cute::Int<Q_CHUNK_SIZE>>{});
@@ -799,10 +793,10 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                             o_new * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_new, max_merge), "out_chunk_reduction_new_sub"))  
                         , "out_chunk_reduction");       // 去除sum除法，统一到最后
                 sTensor_out(coord) = o_merge;
-                toy_flash_attn_assert(thread_block_size >= head_dim_stride);
+                toy_flash_attn_assert(THR_NUM >= HEAD_DIM_STRIDE);
             }
             __syncthreads();
-            toy_flash_attn_assert(thread_block_size >= Q_CHUNK_SIZE);
+            toy_flash_attn_assert(THR_NUM >= Q_CHUNK_SIZE);
             if (threadIdx.x < Q_CHUNK_SIZE) {   // TODO, 做成2个buffer
                 int q_off = threadIdx.x;
                 auto max_new = sTensor_warp_max(q_off, 0);
@@ -890,7 +884,7 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SI
 
     assert(head_dim <= 128);        // 泛化
 
-    dim3 block(HEAD_DIM_STRIDE);
+    dim3 block(THR_NUM);
     dim3 grid(batch_size, (max_seqlen_q + Q_CHUNK_SIZE - 1)/Q_CHUNK_SIZE, num_q_heads);
 
     ParamSet param = {
@@ -927,6 +921,6 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SI
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-    m.def("flash_attn_varlen_with_block_v6_64", &FlashAttnTrait<at::BFloat16, float, 16, 64, 64>::flash_attn_varlen_with_block, "flash attn varlen with block");
+    m.def("flash_attn_varlen_with_block_v7_64", &FlashAttnTrait<at::BFloat16, float, 16, 32, 64>::flash_attn_varlen_with_block, "flash attn varlen with block");
     // m.def("flash_attn_varlen_with_block_v5_128", &FlashAttnTrait<at::BFloat16, float, 128, 16, 16>::flash_attn_varlen_with_block, "flash attn varlen with block");
 }

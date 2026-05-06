@@ -24,7 +24,8 @@ MODEL_CONFIGS = {
         "revision": "7ae557604adf67be50417f59c2c2f167def9a775",
     },
 }
-
+if os.getenv("TOY_FLASH_ATTN_CUDA_VERSION") is None:
+    os.environ["TOY_FLASH_ATTN_CUDA_VERSION"] = "v7"
 
 def _attention_config() -> tuple[str, str, str]:
     impl = os.environ.get("TOY_FLASH_ATTN_USE", "bf16")
