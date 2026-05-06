@@ -8,13 +8,13 @@ PYTHON_BIN="${PYTHON_BIN:-python}"
 NCU_BIN="${NCU_BIN:-ncu}"
 NCU_SET="full"
 CASE_NAME=""
-VERSIONS="v6,official"
+VERSIONS="v7,official"
 OUTPUT_DIR=""
 
 usage() {
   cat <<'EOF'
 Usage:
-  run_ncu_case.sh --case <case> [--versions v6,official] [--output-dir <dir>] [--set full]
+  run_ncu_case.sh --case <case> [--versions v7,official] [--output-dir <dir>] [--set full]
 
 Supported cases:
   qwen_like_b1_s128_h64
@@ -22,6 +22,7 @@ Supported cases:
   qwen_like_b1_s2048_h64
 
 Supported versions:
+  v7
   v6
   official
 
@@ -78,7 +79,7 @@ validate_versions() {
   IFS=',' read -r -a version_list <<<"${VERSIONS}"
   for version in "${version_list[@]}"; do
     case "${version}" in
-      v6|official)
+      v7|v6|official)
         ;;
       *)
         echo "unsupported ncu version: ${version}" >&2

@@ -14,7 +14,7 @@ SKIP_REPORT_INPUTS=0
 SKIP_NCU=0
 WITH_NCU=0
 NCU_CASE=""
-NCU_VERSIONS="v6,official"
+NCU_VERSIONS="v7,official"
 NCU_SET="full"
 
 E2E_RUNNER="${BACKEND_ROOT}/bench/e2e/collect_e2e.sh"
@@ -57,7 +57,7 @@ usage() {
 Usage:
   run_perf_eval.sh [light|full] [--skip-e2e] [--skip-op] [--skip-correctness]
                    [--skip-version-summary] [--skip-report-inputs]
-                   [--with-ncu --ncu-case <case> [--ncu-versions v6,official] [--ncu-set full]]
+                   [--with-ncu --ncu-case <case> [--ncu-versions v7,official] [--ncu-set full]]
                    [--skip-ncu]
 
 Modes:
@@ -77,7 +77,7 @@ Skip flags:
 NCU:
   --with-ncu
   --ncu-case <case>
-  --ncu-versions v6,official
+  --ncu-versions v7,official
   --ncu-set full
 
 Environment:
@@ -222,7 +222,7 @@ run_op_case() {
 
 run_op() {
   local mode="$1"
-  local -a versions=("baseline" "v5" "v6" "official")
+  local -a versions=("baseline" "v5" "v6" "v7" "official")
   local -a cases
   if [[ "${mode}" == "full" ]]; then
     cases=(

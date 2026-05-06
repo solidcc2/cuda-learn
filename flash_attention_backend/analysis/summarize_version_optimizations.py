@@ -64,14 +64,27 @@ def main() -> None:
                 "version": "v6",
                 "positioning": "Custom CUDA paged path using the CuTe-based v6 kernel.",
                 "added_vs_previous": [
-                    "Makes v6 the default CUDA implementation when TOY_FLASH_ATTN_CUDA_VERSION is unset.",
                     "Binds the v6 kernel through the shared bf16 CUDA wrapper alias.",
-                    "Current exported specialization is head_dim=64 only."
+                    "Current exported specialization is head_dim=64 only.",
                 ],
                 "code_evidence": [
                     "flash_attention_backend/toy_flash_attn/flash_attention_func.py",
                     "flash_attention_backend/toy_flash_attn/v6/flash_attn_func.cu",
                     "flash_attention_backend/toy_flash_attn/v6/helper.h",
+                ],
+            },
+            {
+                "version": "v7",
+                "positioning": "Custom CUDA paged path using the v7 kernel.",
+                "added_vs_previous": [
+                    "Makes v7 the default CUDA implementation when TOY_FLASH_ATTN_CUDA_VERSION is unset.",
+                    "Binds the v7 kernel through the shared bf16 CUDA wrapper alias.",
+                    "Current exported specialization is head_dim=64 only.",
+                ],
+                "code_evidence": [
+                    "flash_attention_backend/toy_flash_attn/flash_attention_func.py",
+                    "flash_attention_backend/toy_flash_attn/v7/flash_attn_func.cu",
+                    "flash_attention_backend/toy_flash_attn/v7/helper.h",
                 ],
             },
             {

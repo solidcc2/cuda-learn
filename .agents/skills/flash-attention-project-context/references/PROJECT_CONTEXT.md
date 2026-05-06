@@ -20,8 +20,8 @@ It is a navigation map, not a source of truth. Before giving conclusions or maki
 
 | Field | Value |
 | --- | --- |
-| last_verified_commit | `aa5e8a195d503cc54425fe71c6b601e66ae49e36` |
-| refresh_scope | Incremental refresh for default CUDA version semantics, stage-3 correctness collect gating, unified analysis collection entry semantics, and optional NCU integration. |
+| last_verified_commit | `19e1d5d672eeee319392f9063fb85600259c81fe` |
+| refresh_scope | Incremental refresh for v7 default CUDA version semantics, benchmark version lists, correctness collect gating, and version-summary coverage. |
 
 When current `git rev-parse HEAD` differs from `last_verified_commit`, refresh this map before relying on it.
 
@@ -38,6 +38,7 @@ Refresh mode:
 | v4 CUDA kernel | Current toy CUDA kernel | `flash_attention_backend/toy_flash_attn/v4/flash_attn_func.cu`, `flash_attention_backend/toy_flash_attn/v4/helper.h` |
 | v5 CUDA kernel | WMMA/Tensor Core toy CUDA kernel | `flash_attention_backend/toy_flash_attn/v5/flash_attn_func.cu`, `flash_attention_backend/toy_flash_attn/v5/helper.h` |
 | v6 CUDA kernel | CuTe-based toy CUDA kernel | `flash_attention_backend/toy_flash_attn/v6/flash_attn_func.cu`, `flash_attention_backend/toy_flash_attn/v6/helper.h` |
+| v7 CUDA kernel | Current default toy CUDA kernel | `flash_attention_backend/toy_flash_attn/v7/flash_attn_func.cu`, `flash_attention_backend/toy_flash_attn/v7/helper.h` |
 | v3 CUDA kernel | Older CUDA implementation | `flash_attention_backend/toy_flash_attn/flash_attn_func_v3.cu` |
 | vLLM smoke runner | End-to-end generation entrypoint | `flash_attention_backend/test_self_flash_attn_backend.py` |
 | CuTe torch extension demo | PyTorch JIT extension examples for learning CuTe tensor/layout/tile concepts plus a small SM80 MMA GEMM path | `flash_attention_backend/test/test_cute_torch_extension.py`, `flash_attention_backend/test/cute_bias_add_kernel.cu`, `flash_attention_backend/test/cute_mma_gemm_kernel.cu` |
@@ -53,7 +54,7 @@ Verify these in code before relying on them.
 | Variable | Current role | Primary files to check |
 | --- | --- | --- |
 | `TOY_FLASH_ATTN_USE` | Selects reference / bf16 / fp32 path in wrapper; selects official / custom backend in smoke runner; shell collection entrypoints may propagate it to subcommands | `toy_flash_attn/flash_attention_func.py`, `test_self_flash_attn_backend.py`, `bench/e2e/collect_e2e.sh`, `analysis/run_perf_eval.sh` |
-| `TOY_FLASH_ATTN_CUDA_VERSION` | Selects v3, v4, v5, or v6 extension at import time; may be inherited by benchmark shell entrypoints | `toy_flash_attn/flash_attention_func.py`, `bench/e2e/collect_e2e.sh`, `analysis/run_perf_eval.sh`, `toy_flash_attn/README.md` |
+| `TOY_FLASH_ATTN_CUDA_VERSION` | Selects v3, v4, v5, v6, or v7 extension at import time; may be inherited by benchmark shell entrypoints | `toy_flash_attn/flash_attention_func.py`, `bench/e2e/collect_e2e.sh`, `analysis/run_perf_eval.sh`, `toy_flash_attn/README.md` |
 | `TOY_FLASH_ATTN_DEBUG` | Prints wrapper input tensor metadata | `toy_flash_attn/flash_attention_func.py` |
 | `TOY_FLASH_ATTN_PRINT_DTYPE` | Prints Python reference dtype trace | `toy_flash_attn/flash_attention_func.py` |
 | `TOY_FLASH_ATTN_DUMP_DIR` | Dumps attention context for replay/debug | `toy_flash_attn/flash_attention_func.py`, `toy_flash_attn/README.md` |
@@ -85,13 +86,13 @@ Current facts to verify before use:
 
 - `TOY_FLASH_ATTN_USE=reference` routes to Python reference for paged attention.
 - `TOY_FLASH_ATTN_USE=fp32` routes to v4 fp32 CUDA wrapper.
-- default/custom bf16 path routes to v5/v4/v3 bf16 op depending on loaded CUDA version.
+- default/custom bf16 path routes to v7/v6/v5/v4/v3 bf16 op depending on loaded CUDA version.
 - `TOY_FLASH_ATTN_USE=official` is interpreted by the vLLM smoke runner as official FlashAttention backend.
 - The smoke runner may still accept old misspelling `offical`; verify current code before documenting this.
 
 ## CUDA Version Loading Dependency
 
-When changing v3/v4/v5/v6 loading or op aliases, check:
+When changing v3/v4/v5/v6/v7 loading or op aliases, check:
 
 - extension `load(...)` block in `toy_flash_attn/flash_attention_func.py`;
 - v3, v4, and v5 op names exported by CUDA bindings;
@@ -103,12 +104,14 @@ When changing v3/v4/v5/v6 loading or op aliases, check:
 
 Current facts to verify before use:
 
-- default CUDA implementation version is `v6`;
+- default CUDA implementation version is `v7`;
 - v3 registers only bf16 alias and has no fp32 op alias;
 - v4 registers bf16 and fp32 op aliases.
 - v5 registers bf16 WMMA aliases for supported head-dim specializations; verify current exported op names before use.
-- v6 is loadable through the same wrapper path and is now the default when `TOY_FLASH_ATTN_CUDA_VERSION` is unset.
+- v6 is loadable through the same wrapper path.
+- v7 is loadable through the same wrapper path and is now the default when `TOY_FLASH_ATTN_CUDA_VERSION` is unset.
 - v6 currently exports only `flash_attn_varlen_with_block_v6_64`; `head_dim=16/32` should not be treated as supported v6 smoke coverage.
+- v7 currently exports only `flash_attn_varlen_with_block_v7_64`; `head_dim=16/32` should not be treated as supported v7 smoke coverage.
 
 ## v4 Kernel Dependency
 

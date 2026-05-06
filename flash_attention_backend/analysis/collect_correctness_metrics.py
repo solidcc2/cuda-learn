@@ -103,13 +103,13 @@ def _measured_case(
 
 def _support_boundary() -> dict[str, Any]:
     version = current_cuda_impl_version()
-    if version == "v6":
+    if version in {"v6", "v7"}:
         return {
             "cuda_impl_version": version,
             "with_block_cu": {
                 "supported_head_dims": [64],
                 "unsupported_head_dims": [16, 32],
-                "note": "Current v6 export binds only the v6_64 specialization.",
+                "note": f"Current {version} export binds only the {version}_64 specialization.",
             },
         }
     return {
@@ -117,7 +117,7 @@ def _support_boundary() -> dict[str, Any]:
         "with_block_cu": {
             "supported_head_dims": None,
             "unsupported_head_dims": [],
-            "note": "Collect-mode support boundary is only codified for v6 right now.",
+            "note": "Collect-mode support boundary is only codified for v6/v7 right now.",
         },
     }
 
@@ -169,18 +169,18 @@ def collect_cases() -> dict[str, Any]:
         )
     )
 
-    if version == "v6":
+    if version in {"v6", "v7"}:
         cases.append(
             _unsupported_case(
                 "cuda_with_block_cu_head_dim_16",
-                reason="Current v6 collect-mode mainline only supports head_dim=64.",
+                reason=f"Current {version} collect-mode mainline only supports head_dim=64.",
                 metadata={"suite": "cuda_regression", "head_dim": 16},
             )
         )
         cases.append(
             _unsupported_case(
                 "cuda_with_block_cu_head_dim_32",
-                reason="Current v6 collect-mode mainline only supports head_dim=64.",
+                reason=f"Current {version} collect-mode mainline only supports head_dim=64.",
                 metadata={"suite": "cuda_regression", "head_dim": 32},
             )
         )

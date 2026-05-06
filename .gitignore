@@ -11,3 +11,5 @@ perf_logs
 .codex
 compile_commands.json
 .cache
+flash_attention_backend/analysis/artifacts
+

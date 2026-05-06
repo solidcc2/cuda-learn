@@ -40,7 +40,7 @@ STEP0_REPLAY_DUMP = "00000_with_block.pt"
 
 
 def current_cuda_impl_version() -> str:
-    return os.environ.get("TOY_FLASH_ATTN_CUDA_VERSION", "v6").lower()
+    return os.environ.get("TOY_FLASH_ATTN_CUDA_VERSION", "v7").lower()
 
 
 def require_cuda() -> None:

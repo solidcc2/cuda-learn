@@ -104,19 +104,37 @@ def _pick_kernel_row(rows: list[dict[str, str]]) -> dict[str, str] | None:
 
 def _row_number(row: dict[str, str], aliases: list[str]) -> float | None:
     alias_norms = [_normalize(alias) for alias in aliases]
-    for metric_name, value in row.items():
-        metric_norm = _normalize(metric_name)
-        if any(alias == metric_norm or alias in metric_norm or metric_norm in alias for alias in alias_norms):
-            return _parse_number(value)
+    normalized_items = [(_normalize(metric_name), value) for metric_name, value in row.items()]
+    for alias in alias_norms:
+        for metric_norm, value in normalized_items:
+            if metric_norm == alias:
+                parsed = _parse_number(value)
+                if parsed is not None:
+                    return parsed
+    for alias in alias_norms:
+        for metric_norm, value in normalized_items:
+            if alias in metric_norm:
+                parsed = _parse_number(value)
+                if parsed is not None:
+                    return parsed
     return None
 
 
 def _row_text(row: dict[str, str], aliases: list[str]) -> str | None:
     alias_norms = [_normalize(alias) for alias in aliases]
-    for metric_name, value in row.items():
-        metric_norm = _normalize(metric_name)
-        if any(alias == metric_norm or alias in metric_norm or metric_norm in alias for alias in alias_norms):
-            return value.strip() or None
+    normalized_items = [(_normalize(metric_name), value) for metric_name, value in row.items()]
+    for alias in alias_norms:
+        for metric_norm, value in normalized_items:
+            if metric_norm == alias:
+                text = value.strip()
+                if text:
+                    return text
+    for alias in alias_norms:
+        for metric_norm, value in normalized_items:
+            if alias in metric_norm:
+                text = value.strip()
+                if text:
+                    return text
     return None
 
 
@@ -283,12 +301,17 @@ def _summarize_version(case_name: str, version: str, input_dir: Path) -> dict[st
 def _comparison_summary(per_version: list[dict[str, Any]]) -> dict[str, Any]:
     by_version = {item["version"]: item for item in per_version}
     comparison: dict[str, Any] = {"versions": [item["version"] for item in per_version]}
-    if "v6" in by_version and "official" in by_version:
-        v6 = by_version["v6"]
+    primary_version = None
+    if "v7" in by_version:
+        primary_version = "v7"
+    elif "v6" in by_version:
+        primary_version = "v6"
+    if primary_version is not None and "official" in by_version:
+        primary = by_version[primary_version]
         official = by_version["official"]
-        if isinstance(v6.get("duration_us"), (int, float)) and isinstance(official.get("duration_us"), (int, float)) and official["duration_us"]:
-            comparison["v6_vs_official_duration_ratio"] = v6["duration_us"] / official["duration_us"]
-        comparison["combined_labels"] = sorted(set(v6.get("labels", [])) | set(official.get("labels", [])))
+        if isinstance(primary.get("duration_us"), (int, float)) and isinstance(official.get("duration_us"), (int, float)) and official["duration_us"]:
+            comparison[f"{primary_version}_vs_official_duration_ratio"] = primary["duration_us"] / official["duration_us"]
+        comparison["combined_labels"] = sorted(set(primary.get("labels", [])) | set(official.get("labels", [])))
     return comparison
 
 
@@ -337,7 +360,7 @@ def main() -> None:
     output_md = args.output_md or (args.input_dir / "SUMMARY.md")
 
     per_version = []
-    for version in ("v6", "official"):
+    for version in ("v7", "v6", "official"):
         item = _summarize_version(args.case, version, args.input_dir)
         if item is not None:
             per_version.append(item)
