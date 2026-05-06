@@ -200,7 +200,7 @@ def require_with_block_cu_launch_constraints(head_dim: int) -> None:
         )
 
 
-def run_official(
+def run_official_dense(
     q: torch.Tensor,
     k: torch.Tensor,
     v: torch.Tensor,
@@ -221,6 +221,34 @@ def run_official(
         cu_seqlens_k=cu_seqlens_k,
         causal=causal,
         window_size=list(window_size) if window_size is not None else None,
+        fa_version=2,
+    )
+
+
+def run_official(
+    q: torch.Tensor,
+    k_cache: torch.Tensor,
+    v_cache: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    max_seqlen_q: int,
+    max_seqlen_k: int,
+    seqused_k: torch.Tensor,
+    causal: bool,
+    window_size: tuple[int, int] | None,
+    block_table: torch.Tensor,
+) -> torch.Tensor:
+    return official_flash_attn_varlen_func(
+        q=q,
+        k=k_cache,
+        v=v_cache,
+        max_seqlen_q=max_seqlen_q,
+        cu_seqlens_q=cu_seqlens_q,
+        max_seqlen_k=max_seqlen_k,
+        cu_seqlens_k=None,
+        seqused_k=seqused_k,
+        causal=causal,
+        window_size=list(window_size) if window_size is not None else None,
+        block_table=block_table,
         fa_version=2,
     )
 

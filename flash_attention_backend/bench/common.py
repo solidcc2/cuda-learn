@@ -80,10 +80,10 @@ VERSION_CONFIGS: dict[str, VersionConfig] = {
         version="official",
         toy_flash_attn_use="official",
         attention_backend="FLASH_ATTN",
-        kv_cache_dtype="auto",
+        kv_cache_dtype="bfloat16",
         cuda_version=None,
-        path_kind="dense",
-        description="Official dense FlashAttention decoder path.",
+        path_kind="paged",
+        description="Official paged FlashAttention decoder path.",
     ),
 }
 

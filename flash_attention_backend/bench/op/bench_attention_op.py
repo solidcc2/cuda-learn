@@ -121,6 +121,7 @@ def _build_inputs(case: dict[str, Any]) -> dict[str, Any]:
         k_dense=k,
         v_dense=v,
         k_lens=case["k_lens"],
+        block_size=16,
     )
     return {
         "q": q,
@@ -145,14 +146,15 @@ def _make_runner(version: str, case: dict[str, Any], tensors: dict[str, Any]):
         def run() -> torch.Tensor:
             return test_utils.run_official(
                 q=tensors["q"],
-                k=tensors["k"],
-                v=tensors["v"],
+                k_cache=tensors["k_cache"],
+                v_cache=tensors["v_cache"],
                 cu_seqlens_q=tensors["cu_seqlens_q"],
-                cu_seqlens_k=tensors["cu_seqlens_k"],
                 max_seqlen_q=tensors["max_seqlen_q"],
                 max_seqlen_k=tensors["max_seqlen_k"],
+                seqused_k=tensors["seqused_k"],
                 causal=case["causal"],
                 window_size=case["window_size"],
+                block_table=tensors["block_table"],
             )
 
         return run

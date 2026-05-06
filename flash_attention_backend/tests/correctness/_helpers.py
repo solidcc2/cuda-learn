@@ -13,7 +13,7 @@ from flash_attention_backend.toy_flash_attn.test_utils import (
     make_block_cache,
     make_inputs,
     replay_dump_close,
-    run_official,
+    run_official_dense,
     run_toy_dense,
     run_toy_paged,
     run_toy_paged_cuda,
@@ -102,7 +102,7 @@ def measure_close(
         head_dim=head_dim,
         dtype=dtype,
     )
-    out_ref = run_official(
+    out_ref = run_official_dense(
         q=q,
         k=k,
         v=v,
