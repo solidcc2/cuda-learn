@@ -5,23 +5,9 @@
 #include <cassert>
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
-#include <cuda_bf16.h>
-#include <mma.h>
-#include <cuda_bf16.h>
 #include <torch/headeronly/util/BFloat16.h>
 #include <type_traits>
-
-#include "cute/arch/mma_sm80.hpp"
-#include "cutlass/fast_math.h"
-#include "cute/atom/mma_atom.hpp"
-#include "cute/container/array_subbyte.hpp"
-#include "cute/int_tuple.hpp"
-#include "cute/layout.hpp"
-#include "cute/numeric/integral_constant.hpp"
-#include "cute/pointer.hpp"
-#include "cute/pointer_flagged.hpp"
-#include "cute/stride.hpp"
-#include "cute/tensor_impl.hpp"
+#include <cute/tensor.hpp>
 #include "helper.h"
 
 template<typename scalar_t, typename inner_scalar_t, int Q_CHUNK_SIZE, int KV_CHUNK_SIZE, int HEAD_DIM_STRIDE>
@@ -385,20 +371,48 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
         cute::make_stride(cute::_1{})
     );
 
-
-    {   // load q chunk         
-        auto gQ_chunk = cute::local_tile(
+    {
+        cute::Tensor gQ_chunk = cute::local_tile(
             gTensor_Q_batch(cute::_, param.q_head_id(), cute::_),   // 取当前head得到一个2维 tile
             cute::shape(sTensor_q),
             cute::make_coord(param.q_chunk_id(), cute::Int<0>{})
         );
-        // 这一版本先不TiledCopy先手写
-        for(int linear = threadIdx.x; linear < cute::size(sTensor_q); linear += blockDim.x) {
-            auto coord = cute::idx2crd(linear, cute::shape(sTensor_q));
-            auto [q_off, head_off] = coord;
-            auto q_token_id = Q_CHUNK_SIZE * param.q_chunk_id() + q_off;
-            bool valid = q_token_id < param.q_seqlen() && head_off < param.head_dim;
-            sTensor_q(coord) = valid ? gQ_chunk(coord) : scalar_t{0};
+        cute::Tensor Q_id = cute::make_identity_tensor(cute::shape(gTensor_Q_batch));
+        cute::Tensor Q_id_chunk = cute::local_tile(
+            Q_id(cute::_, param.q_head_id(), cute::_),
+            cute::shape(sTensor_q),
+            cute::make_coord(param.q_chunk_id(), cute::Int<0>{})
+        );
+
+        constexpr int thr_data = sizeof(cute::uint128_t) / sizeof(scalar_t);
+        constexpr int thr_col = HEAD_DIM_STRIDE / thr_data;
+        constexpr int thr_row = THR_NUM / thr_col;
+        cute::Layout thr_layout = cute::make_layout(
+            cute::make_shape(cute::Int<thr_row>{}, cute::Int<thr_col>{}),
+            cute::LayoutRight{}
+        );
+        cute::Layout val_layout = cute::make_layout(
+            cute::make_shape(cute::_1{}, cute::Int<thr_data>{})
+        );
+
+        cute::TiledCopy copy_a = cute::make_tiled_copy(
+            cute::Copy_Atom<cute::UniversalCopy<cute::uint128_t>, scalar_t>{},
+            thr_layout, val_layout
+        );
+        if (threadIdx.x < cute::size(copy_a)) {
+            cute::ThrCopy copy = copy_a.get_slice(threadIdx.x);
+            cute::Tensor src = copy.partition_S(gQ_chunk);
+            cute::Tensor src_id = copy.partition_S(Q_id_chunk);
+            cute::Tensor dst = copy.partition_D(sTensor_q);
+            cute::Tensor pred = cute::make_tensor<bool>(cute::shape(src));
+            
+            CUTE_UNROLL
+            for(int i=0; i < cute::size(pred); i++) {
+                auto coord = src_id(i);
+                pred(i) = cute::elem_less(src_id(i), cute::shape(gTensor_Q_batch));
+            }
+            cute::fill(dst, scalar_t{0});
+            cute::copy_if(pred, src, dst);
         }
         __syncthreads();
     }
@@ -872,9 +886,6 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SI
         window_size_left, window_size_right,
         block_table, 
         out);
-#ifdef DEBUG_FLASH_ATTN_TRACE
-    printf("########### flash attn v3 ###############\n");
-#endif
     int head_dim = q.size(2);
     auto batch_size = seqused_k.size(0);
     auto num_q_heads = q.size(1);
