@@ -1,7 +1,3 @@
-## TODO
-### 20260321
-写一个触发大量bank conflict的代码，并nsys查看效果
-
 ## 心得
 ###
 1. 充分的数值校验接口，保证数值不稳定可及早判别。
@@ -28,6 +24,12 @@
 | version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | v7 | `void kernel_wrapper<c10::BFloat16, float, 16, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5>::ParamSet)` | 1629.504 | 0.85 | 85.09 | 8.35 | 0.16 | 3045266.0 | 3440976.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, shared_bank_conflict_risk |
+
+3. 由于当前整体访存还是比较粗放的单bf16的访问，将Sizzle<3,2,3>改为Swizzle<5, 1>, 可以看到bank conflict有明显变好，但是整体duration没有明显变化，说明现阶段主要问题是global excessive sector过高，kv分页，每次单元素读取导致gmem访问次数过多，接下来的优先解决事项应该尽量让kv按block访问，尽量对gmem的访存合并，改变访存策略，再来尝试调整bank conflict(2bace466bf45097745827b08d9e0a34b55e9bbe9)
+
+| version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v7 | `void kernel_wrapper<c10::BFloat16, float, 16, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5>::ParamSet)` | 1625.248 | 0.99 | 74.21 | 8.37 | 0.16 | 2719122.0 | 3440976.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, shared_bank_conflict_risk |
 
 
 ### 20260506

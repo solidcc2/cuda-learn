@@ -325,7 +325,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
         cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::Int<1>{})
     );
     auto k_layout = cute::composition(
-        cute::Swizzle<3, 2, 3>{},
+        cute::Swizzle<5, 1>{},
         kv_head_layout
     );
     auto sTensor_k = cute::make_tensor(
