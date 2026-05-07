@@ -317,35 +317,53 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
 
     auto sTensor_q = cute::make_tensor(
         cute::make_smem_ptr(layout.q),
-        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
-        cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::Int<1>{})
-    );
-    cute::Layout kv_head_layout = cute::make_layout(
-        cute::make_shape(cute::Int<KV_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
-        cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::Int<1>{})
-    );
-    auto k_layout = cute::composition(
-        cute::Swizzle<5, 1>{},
-        kv_head_layout
+        cute::composition(
+            cute::Swizzle<5, 1>{},
+            cute::make_layout(
+                cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
+                cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::Int<1>{})
+            )
+        )
     );
     auto sTensor_k = cute::make_tensor(
         cute::make_smem_ptr(layout.k),
-        k_layout
+        cute::composition(
+            cute::Swizzle<5, 1>{},
+            cute::make_layout(
+                cute::make_shape(cute::Int<KV_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
+                cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::Int<1>{})
+            )
+        )
     );
     auto sTensor_v_t = cute::make_tensor(
         cute::make_smem_ptr(layout.v),
-        cute::make_shape(cute::Int<HEAD_DIM_STRIDE>{}, cute::Int<KV_CHUNK_SIZE>{}),
-        cute::make_stride(cute::Int<KV_CHUNK_SIZE>{}, cute::Int<1>{})
+        cute::composition(
+            cute::Swizzle<5, 1>{},
+            cute::make_layout(
+                cute::make_shape(cute::Int<HEAD_DIM_STRIDE>{}, cute::Int<KV_CHUNK_SIZE>{}),
+                cute::make_stride(cute::Int<KV_CHUNK_SIZE>{}, cute::Int<1>{})
+            )
+        )
     );
     auto sTensor_out = cute::make_tensor(
         cute::make_smem_ptr(layout.out),
-        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
-        cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::Int<1>{})
+        cute::composition(
+            cute::Swizzle<5, 0>{},
+            cute::make_layout(
+                cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
+                cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::Int<1>{})
+            )
+        )
     );
     auto sTensor_score = cute::make_tensor(
         cute::make_smem_ptr(layout.score_reduction),
-        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
-        cute::make_stride(cute::Int<KV_CHUNK_SIZE>{}, cute::_1{})
+        cute::composition(
+            cute::Swizzle<5, 0>{},
+            cute::make_layout(
+                cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
+                cute::make_stride(cute::Int<KV_CHUNK_SIZE>{}, cute::_1{})
+            )
+        )
     );
     auto sTensor_warp_max = cute::make_tensor(
         cute::make_smem_ptr(layout.warp_max),
