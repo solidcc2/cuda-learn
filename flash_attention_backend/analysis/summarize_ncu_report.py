@@ -324,12 +324,12 @@ def _render_summary_markdown(summary: dict[str, Any]) -> str:
         "",
         "## Per Version",
         "",
-        "| version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | labels |",
-        "| --- | --- | --- | --- | --- | --- | --- | --- |",
+        "| version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
     ]
     for item in summary["per_version"]:
         lines.append(
-            "| {version} | `{kernel}` | {duration} | {dram} | {l2} | {occ} | {eligible} | {labels} |".format(
+            "| {version} | `{kernel}` | {duration} | {dram} | {l2} | {occ} | {eligible} | {bank_conflicts} | {global_excessive} | {labels} |".format(
                 version=item["version"],
                 kernel=item.get("kernel_name") or "未采集",
                 duration=item.get("duration_us") if item.get("duration_us") is not None else "未采集",
@@ -337,6 +337,8 @@ def _render_summary_markdown(summary: dict[str, Any]) -> str:
                 l2=item.get("l2_hit_rate") if item.get("l2_hit_rate") is not None else "未采集",
                 occ=item.get("achieved_occupancy_pct") if item.get("achieved_occupancy_pct") is not None else "未采集",
                 eligible=item.get("eligible_warps_per_scheduler") if item.get("eligible_warps_per_scheduler") is not None else "未采集",
+                bank_conflicts=item.get("shared_bank_conflicts") if item.get("shared_bank_conflicts") is not None else "未采集",
+                global_excessive=item.get("global_memory_excessive_sectors") if item.get("global_memory_excessive_sectors") is not None else "未采集",
                 labels=", ".join(item.get("labels", [])) or "无",
             )
         )

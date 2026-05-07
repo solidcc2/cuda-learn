@@ -17,11 +17,11 @@
 ### 20260507
 1. 直接对比当前的v6, v7, official的分析报告，可以看出，在小规模case(qwen_like_b1_s2048_h64)下，可以看到如下数据。l2 hit优势不具备说明意义；极低的占用率应该是问题规模导致，因为eligible普遍低，dram带宽极低。并且有lable明确说明bank conflict是现阶段最优先需要解决问题。
 
-| version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | labels |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| v7 | `void kernel_wrapper<c10::BFloat16, float, 16, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5>::ParamSet)` | 1658.528 | 0.86 | 84.19 | 8.36 | 0.16 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, shared_bank_conflict_risk |
-| v6 | `void kernel_wrapper<c10::BFloat16, float, 64, 128>(FlashAttnTrait<T1, T2, T3, T4>::ParamSet)` | 1652.512 | 0.82 | 85.38 | 8.34 | 0.16 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, shared_bank_conflict_risk |
-| official | `void flash::flash_fwd_splitkv_kernel<Flash_fwd_kernel_traits<64, 64, 256, 4, 0, 0, cutlass::bfloat16_t, Flash_kernel_traits<64, 64, 256, 4, cutlass::bfloat16_t>>, 0, 0, 0, 0, 1, 0, 1, 0>(flash::Flash_fwd_params)` | 29.44 | 43.59 | 10.56 | 8.53 | 0.11 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, local_spill_risk |
+| version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v7 | `void kernel_wrapper<c10::BFloat16, float, 16, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5>::ParamSet)` | 1658.528 | 0.86 | 84.19 | 8.36 | 0.16 | 4579218.0 | 3440976.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, shared_bank_conflict_risk |
+| v6 | `void kernel_wrapper<c10::BFloat16, float, 64, 128>(FlashAttnTrait<T1, T2, T3, T4>::ParamSet)` | 1652.512 | 0.82 | 85.38 | 8.34 | 0.16 | 4585938.0 | 3440640.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, shared_bank_conflict_risk |
+| official | `void flash::flash_fwd_splitkv_kernel<Flash_fwd_kernel_traits<64, 64, 256, 4, 0, 0, cutlass::bfloat16_t, Flash_kernel_traits<64, 64, 256, 4, cutlass::bfloat16_t>>, 0, 0, 0, 0, 1, 0, 1, 0>(flash::Flash_fwd_params)` | 29.44 | 43.59 | 10.56 | 8.53 | 0.11 | 0.0 | 908.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, local_spill_risk |
 
 
 ### 20260506
