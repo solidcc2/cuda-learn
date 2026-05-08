@@ -5,6 +5,8 @@ import sys
 import unittest
 from pathlib import Path
 
+import torch
+
 if __package__ is None or __package__ == "":
     sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
@@ -49,6 +51,9 @@ def main() -> None:
 
             for _ in range(args.warmup):
                 runner()
+            if args.warmup > 0 and args.iters > 0:
+                torch.cuda.synchronize()
+                print("===== WARMUP DONE =====", flush=True)
             for _ in range(args.iters):
                 runner()
     except unittest.SkipTest as exc:

@@ -18,6 +18,18 @@
 | v7 | `void kernel_wrapper<c10::BFloat16, float, 16, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5>::ParamSet)` | 1525.312 | 0.88 | 85.12 | 8.34 | 0.18 | 1734208.0 | 1605968.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, shared_bank_conflict_risk |
 | official | `void flash::flash_fwd_splitkv_kernel<Flash_fwd_kernel_traits<64, 64, 256, 4, 0, 0, cutlass::bfloat16_t, Flash_kernel_traits<64, 64, 256, 4, cutlass::bfloat16_t>>, 0, 0, 0, 0, 1, 0, 1, 0>(flash::Flash_fwd_params)` | 29.6 | 43.46 | 10.28 | 8.48 | 0.11 | 0.0 | 908.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, local_spill_risk |
 
+2. 通过加日志，可以进一步确定单kv chunk(32), 只会读取2个block (block_size=16), phy block的载入有周期性。考虑有多head_id载入同一个维度的kv 和 kv chunk被不同q chunk反复轮询的2种情况。
+增加实验对比GQA head数的差异对global excessive sectors的影响。从下面实验数据来看，official在qwen 14/2的情况和14/14,有10倍的差距，而v7接近，所以可以认为官方在gqa角度没有做特殊处理，v7的瓶颈也不在这里。
+
+| case | version | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| mha_b1_s2048_h64_h14_kv14 | v7 | 1533.568 | 5.16 | 2.18 | 8.34 | 0.18 | 1734208.0 | 1605968.0 |
+| mha_b1_s2048_h64_h14_kv14 | official | 116.8 | 67.96 | 1.52 | 8.39 | 0.12 | 0.0 | 84.0 |
+| qwen_like_b1_s2048_h64 | v7 | 1524.864 | 0.9 | 85.68 | 8.33 | 0.18 | 1734208.0 | 1605968.0 |
+| qwen_like_b1_s2048_h64 | official | 29.6 | 43.58 | 10.55 | 8.51 | 0.11 | 0.0 | 908.0 |
+| single_head_b1_s2048_h64_h1_kv1 | v7 | 1531.904 | 0.41 | 30.07 | 8.34 | 0.18 | 123872.0 | 114712.0 |
+| single_head_b1_s2048_h64_h1_kv1 | official | 110.688 | 5.86 | 18.05 | 8.34 | 0.12 | 0.0 | 6.0 |
+
 
 ### 20260507
 1. 直接对比当前的v6, v7, official的分析报告，可以看出，在小规模case(qwen_like_b1_s2048_h64)下，可以看到如下数据。l2 hit优势不具备说明意义；极低的占用率应该是问题规模导致，因为eligible普遍低，dram带宽极低。并且有lable明确说明bank conflict是现阶段最优先需要解决问题。

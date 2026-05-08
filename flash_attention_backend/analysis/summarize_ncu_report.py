@@ -18,11 +18,21 @@ from flash_attention_backend.bench.common import write_json
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input-dir", type=Path, required=True)
-    parser.add_argument("--case", required=True)
+    parser.add_argument("--input-dir", type=Path, default=None)
+    parser.add_argument("--case", default=None)
+    parser.add_argument("--root-dir", type=Path, default=None)
+    parser.add_argument("--cases", default=None)
+    parser.add_argument("--versions", default="v7,v6,official")
     parser.add_argument("--output-json", type=Path, default=None)
     parser.add_argument("--output-md", type=Path, default=None)
-    return parser.parse_args()
+    args = parser.parse_args()
+    if args.root_dir is None and args.input_dir is None:
+        parser.error("either --input-dir or --root-dir is required")
+    if args.root_dir is not None and args.input_dir is not None:
+        parser.error("--input-dir and --root-dir are mutually exclusive")
+    if args.root_dir is None and not args.case:
+        parser.error("--case is required when using --input-dir")
+    return args
 
 
 def _normalize(text: str) -> str:
@@ -315,7 +325,100 @@ def _comparison_summary(per_version: list[dict[str, Any]]) -> dict[str, Any]:
     return comparison
 
 
+def _summarize_case(case_name: str, input_dir: Path, versions: list[str]) -> dict[str, Any]:
+    per_version = []
+    for version in versions:
+        item = _summarize_version(case_name, version, input_dir)
+        if item is not None:
+            per_version.append(item)
+    return {
+        "kind": "flash_attention_backend.ncu_summary",
+        "generated_at_s": time.time(),
+        "case_name": case_name,
+        "versions": [item["version"] for item in per_version],
+        "per_version": per_version,
+        "comparison": _comparison_summary(per_version),
+    }
+
+
+def _render_case_table(summary: dict[str, Any]) -> list[str]:
+    lines = [
+        f"## Case: {summary['case_name']}",
+        "",
+        f"- versions: `{', '.join(summary['versions'])}`",
+        "",
+        "| version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |",
+        "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+    ]
+    for item in summary["per_version"]:
+        lines.append(
+            "| {version} | `{kernel}` | {duration} | {dram} | {l2} | {occ} | {eligible} | {bank_conflicts} | {global_excessive} | {labels} |".format(
+                version=item["version"],
+                kernel=item.get("kernel_name") or "未采集",
+                duration=item.get("duration_us") if item.get("duration_us") is not None else "未采集",
+                dram=item.get("dram_throughput_pct") if item.get("dram_throughput_pct") is not None else "未采集",
+                l2=item.get("l2_hit_rate") if item.get("l2_hit_rate") is not None else "未采集",
+                occ=item.get("achieved_occupancy_pct") if item.get("achieved_occupancy_pct") is not None else "未采集",
+                eligible=item.get("eligible_warps_per_scheduler") if item.get("eligible_warps_per_scheduler") is not None else "未采集",
+                bank_conflicts=item.get("shared_bank_conflicts") if item.get("shared_bank_conflicts") is not None else "未采集",
+                global_excessive=item.get("global_memory_excessive_sectors") if item.get("global_memory_excessive_sectors") is not None else "未采集",
+                labels=", ".join(item.get("labels", [])) or "无",
+            )
+        )
+    lines.extend(
+        [
+            "",
+            "### Comparison",
+            "",
+            "```json",
+            json.dumps(summary["comparison"], indent=2, ensure_ascii=False),
+            "```",
+            "",
+        ]
+    )
+    return lines
+
+
 def _render_summary_markdown(summary: dict[str, Any]) -> str:
+    if summary["kind"] == "flash_attention_backend.ncu_summary_collection":
+        lines = [
+            "# NCU Summary Collection",
+            "",
+            f"- generated_at_s: `{summary['generated_at_s']}`",
+            f"- case_count: `{summary['case_count']}`",
+            f"- versions: `{', '.join(summary['versions'])}`",
+        ]
+        if summary.get("selected_cases"):
+            lines.append(f"- selected_cases: `{', '.join(summary['selected_cases'])}`")
+        lines.append("")
+        lines.extend(
+            [
+                "## Overview",
+                "",
+                "| case | version | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors |",
+                "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+            ]
+        )
+        for case_summary in summary["cases"]:
+            for item in case_summary["per_version"]:
+                lines.append(
+                    "| {case_name} | {version} | {duration} | {dram} | {l2} | {occ} | {eligible} | {bank_conflicts} | {global_excessive} |".format(
+                        case_name=case_summary["case_name"],
+                        version=item["version"],
+                        duration=item.get("duration_us") if item.get("duration_us") is not None else "未采集",
+                        dram=item.get("dram_throughput_pct") if item.get("dram_throughput_pct") is not None else "未采集",
+                        l2=item.get("l2_hit_rate") if item.get("l2_hit_rate") is not None else "未采集",
+                        occ=item.get("achieved_occupancy_pct") if item.get("achieved_occupancy_pct") is not None else "未采集",
+                        eligible=item.get("eligible_warps_per_scheduler") if item.get("eligible_warps_per_scheduler") is not None else "未采集",
+                        bank_conflicts=item.get("shared_bank_conflicts") if item.get("shared_bank_conflicts") is not None else "未采集",
+                        global_excessive=item.get("global_memory_excessive_sectors") if item.get("global_memory_excessive_sectors") is not None else "未采集",
+                    )
+                )
+        lines.append("")
+        for case_summary in summary["cases"]:
+            lines.extend(_render_case_table(case_summary))
+        return "\n".join(lines)
+
     lines = [
         f"# NCU Summary: {summary['case_name']}",
         "",
@@ -358,23 +461,34 @@ def _render_summary_markdown(summary: dict[str, Any]) -> str:
 
 def main() -> None:
     args = parse_args()
-    output_json = args.output_json or (args.input_dir / "summary.json")
-    output_md = args.output_md or (args.input_dir / "SUMMARY.md")
-
-    per_version = []
-    for version in ("v7", "v6", "official"):
-        item = _summarize_version(args.case, version, args.input_dir)
-        if item is not None:
-            per_version.append(item)
-
-    payload = {
-        "kind": "flash_attention_backend.ncu_summary",
-        "generated_at_s": time.time(),
-        "case_name": args.case,
-        "versions": [item["version"] for item in per_version],
-        "per_version": per_version,
-        "comparison": _comparison_summary(per_version),
-    }
+    versions = [item.strip() for item in args.versions.split(",") if item.strip()]
+    if args.root_dir is not None:
+        output_json = args.output_json or (args.root_dir / "summary.json")
+        output_md = args.output_md or (args.root_dir / "SUMMARY.md")
+        selected_cases = None
+        if args.cases:
+            selected_cases = [item.strip() for item in args.cases.split(",") if item.strip()]
+        case_dirs = [path for path in sorted(args.root_dir.iterdir()) if path.is_dir()]
+        if selected_cases is not None:
+            selected = set(selected_cases)
+            case_dirs = [path for path in case_dirs if path.name in selected]
+        case_summaries = []
+        for case_dir in case_dirs:
+            case_summary = _summarize_case(case_dir.name, case_dir, versions)
+            if case_summary["per_version"]:
+                case_summaries.append(case_summary)
+        payload = {
+            "kind": "flash_attention_backend.ncu_summary_collection",
+            "generated_at_s": time.time(),
+            "case_count": len(case_summaries),
+            "versions": versions,
+            "selected_cases": selected_cases,
+            "cases": case_summaries,
+        }
+    else:
+        output_json = args.output_json or (args.input_dir / "summary.json")
+        output_md = args.output_md or (args.input_dir / "SUMMARY.md")
+        payload = _summarize_case(args.case, args.input_dir, versions)
     write_json(output_json, payload)
     output_md.write_text(_render_summary_markdown(payload) + "\n")
 

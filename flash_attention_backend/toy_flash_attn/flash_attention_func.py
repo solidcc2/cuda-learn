@@ -7,6 +7,9 @@ from pathlib import Path
 from itertools import count
 
 from torch.utils.cpp_extension import load
+from vllm.vllm_flash_attn.flash_attn_interface import (
+    flash_attn_varlen_func as official_flash_attn_varlen_func,
+)
 
 _THIS_DIR = Path(__file__).resolve().parent
 
@@ -270,6 +273,27 @@ def flash_attn_varlen_func(
         )
     else:
         return flash_attn_varlen_without_block(q, k, v, max_seqlen_q,cu_seqlens_q, max_seqlen_k, cu_seqlens_k, causal, window_size, out)
+
+
+if os.getenv("TOY_FLASH_ATTN_USE", "bf16") == "official_paged":
+    _ops.flash_attn_varlen_with_block_bf16fp32 = (
+        lambda q, k, v, max_seqlen_q, cu_seqlens_q, max_seqlen_k, seqused_k, causal, window_left, window_right, block_table, out=None:
+        official_flash_attn_varlen_func(
+            q=q,
+            k=k,
+            v=v,
+            max_seqlen_q=max_seqlen_q,
+            cu_seqlens_q=cu_seqlens_q,
+            max_seqlen_k=max_seqlen_k,
+            cu_seqlens_k=None,
+            seqused_k=seqused_k,
+            causal=causal,
+            window_size=[window_left, window_right],
+            block_table=block_table,
+            out=out,
+            fa_version=2,
+        )
+    )
 
 def flash_attn_varlen_with_block(
     q: torch.Tensor,    # total_q x num_head x head_dim
