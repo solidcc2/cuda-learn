@@ -10,6 +10,15 @@
 8. 浮点0乘法，可能会因为无关数值，引入正负0,如果为了严格数值对拍和稳定性，最好不要依赖数值计算带来的路径选择，包括+/-inf, +/-0
 
 ## Dev Log
+### 20260508
+1. 通过对kv的读取做phy block的整块读，q, k, v的smem都采用swizzle,同步压低了bank conflict和global excessive sector到最初的1/3, 但是依旧在百万量级，duration有小幅度优化（1658 -> 1525），看起来现阶段两者相互掣肘，无法进入线性释放性能的阶段。
+
+| version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v7 | `void kernel_wrapper<c10::BFloat16, float, 16, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5>::ParamSet)` | 1525.312 | 0.88 | 85.12 | 8.34 | 0.18 | 1734208.0 | 1605968.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, shared_bank_conflict_risk |
+| official | `void flash::flash_fwd_splitkv_kernel<Flash_fwd_kernel_traits<64, 64, 256, 4, 0, 0, cutlass::bfloat16_t, Flash_kernel_traits<64, 64, 256, 4, cutlass::bfloat16_t>>, 0, 0, 0, 0, 1, 0, 1, 0>(flash::Flash_fwd_params)` | 29.6 | 43.46 | 10.28 | 8.48 | 0.11 | 0.0 | 908.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, local_spill_risk |
+
+
 ### 20260507
 1. 直接对比当前的v6, v7, official的分析报告，可以看出，在小规模case(qwen_like_b1_s2048_h64)下，可以看到如下数据。l2 hit优势不具备说明意义；极低的占用率应该是问题规模导致，因为eligible普遍低，dram带宽极低。并且有lable明确说明bank conflict是现阶段最优先需要解决问题。
 
