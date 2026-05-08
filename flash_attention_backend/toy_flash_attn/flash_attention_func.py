@@ -214,7 +214,7 @@ elif _CUDA_IMPL_VERSION == "v7":
             str(_THIS_DIR / "../../vllm_env/lib/python3.10/site-packages/flashinfer/data/cutlass/include")
         ],
         extra_cflags=["-O2"],
-        extra_cuda_cflags=["-O2"],
+        extra_cuda_cflags=["-O2", "-lineinfo"],
         verbose=True,
     )
     _ops.flash_attn_varlen_with_block_bf16fp32 = _ops.flash_attn_varlen_with_block_v7_64

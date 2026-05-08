@@ -30,6 +30,12 @@
 | single_head_b1_s2048_h64_h1_kv1 | v7 | 1531.904 | 0.41 | 30.07 | 8.34 | 0.18 | 123872.0 | 114712.0 |
 | single_head_b1_s2048_h64_h1_kv1 | official | 110.688 | 5.86 | 18.05 | 8.34 | 0.12 | 0.0 | 6.0 |
 
+3. 通过 cuobjdump 和ncu-ui看了反汇编指令集，确认现阶段global excessive sectors高的问题是，tiledcopy退化到LD.E.U16, 通过调整访存结构（layout）和拷贝原子，将tiledcopy固定为LDGSTS.BYPASS.128, 进一步压降到229,376，这个值可以拆解为`229376 = 14个head *( 2048len * 64head_dim * 2B(bf16) * 2(K&V) / 32B(sector))`, 可以看出下一阶段的优化方向是调整CTA结构，将thread block划分按照q head改为按kv head, 则理论上这里可以再压减到1/7, 到3w的量级。此后，虽然还是没达到官方的极限值908, 但是理论上通过压减bank conflict可以得到一定程度的线性加速效果。
+
+| version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v7 | `void kernel_wrapper<c10::BFloat16, float, 16, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5>::ParamSet)` | 1299.616 | 1.15 | 87.41 | 8.34 | 0.17 | 1505557.0 | 229376.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, shared_bank_conflict_risk |
+| official | `void flash::flash_fwd_splitkv_kernel<Flash_fwd_kernel_traits<64, 64, 256, 4, 0, 0, cutlass::bfloat16_t, Flash_kernel_traits<64, 64, 256, 4, cutlass::bfloat16_t>>, 0, 0, 0, 0, 1, 0, 1, 0>(flash::Flash_fwd_params)` | 29.6 | 43.46 | 10.28 | 8.48 | 0.11 | 0.0 | 908.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, local_spill_risk |
 
 ### 20260507
 1. 直接对比当前的v6, v7, official的分析报告，可以看出，在小规模case(qwen_like_b1_s2048_h64)下，可以看到如下数据。l2 hit优势不具备说明意义；极低的占用率应该是问题规模导致，因为eligible普遍低，dram带宽极低。并且有lable明确说明bank conflict是现阶段最优先需要解决问题。
@@ -50,7 +56,8 @@
 
 | version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-| v7 | `void kernel_wrapper<c10::BFloat16, float, 16, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5>::ParamSet)` | 1625.248 | 0.99 | 74.21 | 8.37 | 0.16 | 2719122.0 | 3440976.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, shared_bank_conflict_risk |
+| v7 | `void kernel_wrapper<c10::BFloat16, float, 16, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5>::ParamSet)` | 1299.616 | 1.15 | 87.41 | 8.34 | 0.17 | 1505557.0 | 229376.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, shared_bank_conflict_risk |
+| official | `void flash::flash_fwd_splitkv_kernel<Flash_fwd_kernel_traits<64, 64, 256, 4, 0, 0, cutlass::bfloat16_t, Flash_kernel_traits<64, 64, 256, 4, cutlass::bfloat16_t>>, 0, 0, 0, 0, 1, 0, 1, 0>(flash::Flash_fwd_params)` | 29.6 | 43.46 | 10.28 | 8.48 | 0.11 | 0.0 | 908.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, local_spill_risk |
 
 
 ### 20260506

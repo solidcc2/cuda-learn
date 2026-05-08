@@ -121,12 +121,19 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
         return q_head_id() / q_per_kv_group;
     }
     __device__ inline int64_t q_seqlen() const {
-        const int64_t bid = batch_id();
-        return static_cast<int64_t>(cu_seqlens_q[bid+1] - cu_seqlens_q[bid]);
+        return _q_seqlen;
     }
     __device__ inline int64_t kv_seqlen() const {
-        return static_cast<int64_t>(seqused_k[batch_id()]);
+        return _kv_seqlen;
     }
+    __device__ inline void device_init() {
+        const int64_t bid = batch_id();
+        _q_seqlen = static_cast<int64_t>(cu_seqlens_q[bid+1] - cu_seqlens_q[bid]);
+        _kv_seqlen = static_cast<int64_t>(seqused_k[bid]);
+    }
+
+    int64_t _q_seqlen=0;
+    int64_t _kv_seqlen=0;
 };
 
 // linear -> CacheBlock(phy_id, kcache, vcache, emit)
@@ -256,11 +263,11 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
         offset += ((KV_CHUNK_SIZE / BLOCK_SIZE) + 1) * sizeof(int32_t);
         }
 
-        offset = round_up(offset, alignof(scalar_t));
+        offset = round_up(offset, alignof(cute::uint128_t));
         layout.k_cache = reinterpret_cast<scalar_t*>(smem + offset);
         offset += (BLOCK_SIZE * HEAD_DIM_STRIDE) * sizeof(scalar_t);
 
-        offset = round_up(offset, alignof(scalar_t));
+        offset = round_up(offset, alignof(cute::uint128_t));
         layout.v_cache = reinterpret_cast<scalar_t*>(smem + offset);
         offset += (BLOCK_SIZE * HEAD_DIM_STRIDE) * sizeof(scalar_t);
 
@@ -285,15 +292,19 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
 
     __device__ inline void fetch(int32_t phy_block_id, int32_t head_id) {
         // 考虑将tensor定义放到结构体中去，避免多次定义view
+        toy_flash_attn_assert(param.k_size[3] == HEAD_DIM_STRIDE);
+        toy_flash_attn_assert(param.k_stride[3] == 1);
+        toy_flash_attn_assert(param.v_size[3] == HEAD_DIM_STRIDE);
+        toy_flash_attn_assert(param.v_stride[3] == 1);
         auto gTensor_K = cute::make_tensor(
             cute::make_gmem_ptr(param.k),
             cute::make_shape(param.k_size[0], param.k_size[1], param.k_size[2], param.k_size[3]),
-            cute::make_stride(param.k_stride[0], param.k_stride[1], param.k_stride[2], param.k_stride[3])
+            cute::make_stride(param.k_stride[0], param.k_stride[1], param.k_stride[2], cute::_1{})
         );
         auto gTensor_V = cute::make_tensor(
             cute::make_gmem_ptr(param.v),
             cute::make_shape(param.v_size[0], param.v_size[1], param.v_size[2], param.v_size[3]),
-            cute::make_stride(param.v_stride[0], param.v_stride[1], param.v_stride[2], param.v_stride[3])
+            cute::make_stride(param.v_stride[0], param.v_stride[1], param.v_stride[2], cute::_1{})
         );
         auto sTensor_k_cache = cute::make_tensor(
             cute::make_smem_ptr(k_cache),
@@ -326,14 +337,15 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
         constexpr int32_t thr_row = THR_NUM / thr_col;
         constexpr auto thr_layout = cute::make_layout(
             cute::make_shape(cute::Int<thr_row>{}, cute::Int<thr_col>{}),
-            cute::make_stride(cute::Int<thr_col>{}, cute::_1{})
+            cute::LayoutRight{}
         );
         constexpr auto val_layout = cute::make_layout(
-            cute::make_shape(cute::_1{}, cute::Int<data_per_thr>{})
+            cute::make_shape(cute::_1{}, cute::Int<data_per_thr>{}),
+            cute::LayoutRight{}
         );
 
         cute::TiledCopy copy_a = cute::make_tiled_copy(
-            cute::Copy_Atom<cute::UniversalCopy<cute::uint128_t>, scalar_t>{}, 
+            cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>, scalar_t>{}, 
             thr_layout, val_layout
         );
         if (threadIdx.x < cute::size(copy_a)) {
@@ -346,12 +358,16 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
                 pred(i) = cute::elem_less(src_id(i), cute::shape(gTensor_K));
             }
             cute::fill(dst, scalar_t{0});
-            cute::copy_if(pred, src, dst);
+            // cute::copy_if(pred, src, dst);
+            cute::copy(copy_a, src, dst);
             src = thr_copy.partition_S(gTensor_V_block);
             dst = thr_copy.partition_D(sTensor_v_cache);
             cute::fill(dst, scalar_t{0});
-            cute::copy_if(pred, src, dst);
+            // cute::copy_if(pred, src, dst);
+            cute::copy(copy_a, src, dst);
+            cute::cp_async_fence();
         }
+        cute::cp_async_wait<0>();
     }
 
     scalar_t* q;
@@ -385,6 +401,7 @@ private:
 template<typename scalar_t, typename inner_scalar_t, int Q_CHUNK_SIZE, int KV_CHUNK_SIZE, int HEAD_DIM_STRIDE>
 __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEAD_DIM_STRIDE>::kernel(ParamSet& param) {
     extern __shared__ char smem[];
+    param.device_init();
     TileLayout layout = TileLayout::builder(smem, param);
 
     toy_flash_attn_assert(blockDim.x == THR_NUM);
@@ -416,22 +433,28 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
     const int64_t kv_chunk_begin = kv_seq_begin / KV_CHUNK_SIZE;
     const int64_t kv_chunk_end = (kv_seq_end + KV_CHUNK_SIZE - 1) / KV_CHUNK_SIZE;
 
+    toy_flash_attn_assert(param.q_size[2] == HEAD_DIM_STRIDE);
+    toy_flash_attn_assert(param.q_stride[2] == 1);
+    toy_flash_attn_assert(param.k_size[3] == HEAD_DIM_STRIDE);
+    toy_flash_attn_assert(param.k_stride[3] == 1);
+    toy_flash_attn_assert(param.v_size[3] == HEAD_DIM_STRIDE);
+    toy_flash_attn_assert(param.v_stride[3] == 1);
     auto gTensor_K = cute::make_tensor(
         cute::make_gmem_ptr(param.k),
         cute::make_shape(param.k_size[0], param.k_size[1], param.k_size[2], param.k_size[3]),
-        cute::make_stride(param.k_stride[0], param.k_stride[1], param.k_stride[2], param.k_stride[3])
+        cute::make_stride(param.k_stride[0], param.k_stride[1], param.k_stride[2], cute::_1{})
     );
     auto gTensor_V = cute::make_tensor(
         cute::make_gmem_ptr(param.v),
         cute::make_shape(param.v_size[0], param.v_size[1], param.v_size[2], param.v_size[3]),
-        cute::make_stride(param.v_stride[0], param.v_stride[1], param.v_stride[2], param.v_stride[3])
+        cute::make_stride(param.v_stride[0], param.v_stride[1], param.v_stride[2], cute::_1{})
     );
     auto gTensor_Q_batch = cute::make_tensor(
         cute::make_gmem_ptr(
             param.q + param.q_stride[0] * param.cu_seqlens_q[param.batch_id()]
         ),
         cute::make_shape(int64_t{param.q_seqlen()}, param.q_size[1], param.q_size[2]),
-        cute::make_stride(param.q_stride[0], param.q_stride[1], param.q_stride[2])
+        cute::make_stride(param.q_stride[0], param.q_stride[1], cute::_1{})
     );
     auto gTensor_out_batch = cute::make_tensor(
         cute::make_gmem_ptr(
@@ -443,13 +466,13 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
 
     auto sTensor_q = cute::make_tensor(
         cute::make_smem_ptr(layout.q),
-        cute::composition(
-            cute::Swizzle<5, 1>{},
+        // cute::composition(
+        //     cute::Swizzle<5, 1>{},
             cute::make_layout(
                 cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
                 cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::Int<1>{})
             )
-        )
+        // )
     );
     auto sTensor_k = cute::make_tensor(
         cute::make_smem_ptr(layout.k),
@@ -555,11 +578,13 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
             cute::LayoutRight{}
         );
         cute::Layout val_layout = cute::make_layout(
-            cute::make_shape(cute::_1{}, cute::Int<thr_data>{})
+            cute::make_shape(cute::_1{}, cute::Int<thr_data>{}),
+            cute::LayoutRight{}
         );
 
+        auto copy_atom = cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>, scalar_t>{};
         cute::TiledCopy copy_a = cute::make_tiled_copy(
-            cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>, scalar_t>{},
+            copy_atom,
             thr_layout, val_layout
         );
         if (threadIdx.x < cute::size(copy_a)) {
@@ -574,10 +599,13 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                 auto coord = src_id(i);
                 pred(i) = cute::elem_less(src_id(i), cute::shape(gTensor_Q_batch));
             }
-            cute::fill(dst, scalar_t{0});
-            cute::copy_if(pred, src, dst);
+            // cute::fill(dst, scalar_t{0});
+            // cute::copy_if(pred, src, dst);
+            cute::copy(copy_a, src, dst);
             cute::cp_async_fence();
         }
+        cute::cp_async_wait<0>();   // Q就绪
+        __syncthreads();
     }
     int32_t last_phy_block_id = -1;
 
@@ -604,6 +632,8 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
             //     ];
             // }
             // __syncthreads();
+            // if (cute::thread0())
+            //     cute::print("------\n");
             for(int seq_off = 0; seq_off < KV_CHUNK_SIZE; seq_off ++) {
             // for(int linear = threadIdx.x; linear < cute::size(sTensor_k); linear += blockDim.x) {
                 auto kv_seq_id = kv_chunk_id * KV_CHUNK_SIZE + seq_off;
@@ -619,9 +649,15 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                         param.bt_stride[1] * virt_block_id
                     ];
                     if (last_phy_block_id != phy_block_id) {
+                    // if (last_phy_block_id == -1) {
                         layout.fetch(phy_block_id, param.kv_head_id());
                         last_phy_block_id = phy_block_id;
                         __syncthreads();
+                        // if (cute::thread0()) {
+                        //     cute::print("cache block: ");
+                        //     cute::print(last_phy_block_id);
+                        //     cute::print("\n");
+                        // }
                     }
 
                     // sTensor_k(coord) = gTensor_K(phy_block_id, block_off, param.kv_head_id(), head_off);
@@ -650,10 +686,6 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                     }
                 }  
             }
-            __syncthreads();
-        }
-        {
-            cute::cp_async_wait<0>();   // Q就绪
             __syncthreads();
         }
         {   // QK matmul use mma
