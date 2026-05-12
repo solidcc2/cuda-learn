@@ -77,7 +77,7 @@ struct FlashAttnTrait {
     );
 };
 
-// grid(batch_id, q_token_chunk_id, q_head_id)
+// grid(batch_id, q_token_chunk_id, kv_head_id)
 template<typename scalar_t, typename inner_scalar_t, int Q_CHUNK_SIZE, int KV_CHUNK_SIZE, int HEAD_DIM_STRIDE>
 struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEAD_DIM_STRIDE>::ParamSet {
     const scalar_t* q;    // total_q x num_q_heads x head_dim
@@ -114,11 +114,11 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
     __device__ inline int64_t q_chunk_id() const {
         return blockIdx.y;
     }
-    __device__ inline int64_t q_head_id() const {
-        return blockIdx.z;
+    __device__ inline int64_t q_head_id(int64_t local_q_head) const {
+        return kv_head_id() * q_per_kv_group + local_q_head;
     }
     __device__ inline int64_t kv_head_id() const {
-        return q_head_id() / q_per_kv_group;
+        return blockIdx.z;
     }
     __device__ inline int64_t q_seqlen() const {
         return _q_seqlen;
@@ -186,26 +186,27 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
         
         auto sTensor_out = cute::make_tensor(
             cute::make_smem_ptr(layout.out),
-            cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
-            cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::_1{})
+            cute::make_shape(param.q_per_kv_group, cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
+            cute::LayoutRight{}
         );
         auto sTensor_last_max = cute::make_tensor(
             cute::make_smem_ptr(layout.last_chunk_max),
-            cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}),
-            cute::make_stride(cute::_1{})
+            cute::make_shape(param.q_per_kv_group, cute::Int<Q_CHUNK_SIZE>{}),
+            cute::LayoutRight{}
         );
         auto sTensor_last_sum = cute::make_tensor(
             cute::make_smem_ptr(layout.last_chunk_sum),
-            cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}),
-            cute::make_stride(cute::_1{})
+            cute::make_shape(param.q_per_kv_group, cute::Int<Q_CHUNK_SIZE>{}),
+            cute::LayoutRight{}
         );
         for(int linear = threadIdx.x; linear < cute::size(sTensor_out); linear += THR_NUM) {
             auto coord = cute::idx2crd(linear, cute::shape(sTensor_out));
             sTensor_out(coord) = inner_scalar_t{0};
         }
-        if (threadIdx.x < cute::size(sTensor_last_max)) {
-            sTensor_last_max(threadIdx.x) = inner_scalar_t{-INFINITY};
-            sTensor_last_sum(threadIdx.x) = inner_scalar_t{0};
+        for(int linear = threadIdx.x; linear < cute::size(sTensor_last_max); linear += THR_NUM) {
+            auto coord = cute::idx2crd(linear, cute::shape(sTensor_last_max));
+            sTensor_last_max(coord) = inner_scalar_t{-INFINITY};
+            sTensor_last_sum(coord) = inner_scalar_t{0};
         }
         return layout;
     }
@@ -227,15 +228,15 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
 
         offset = round_up(offset, alignof(inner_scalar_t));
         layout.out = reinterpret_cast<inner_scalar_t*>(smem + offset);
-        offset += (Q_CHUNK_SIZE * HEAD_DIM_STRIDE) * sizeof(inner_scalar_t);
+        offset += (param.q_per_kv_group * Q_CHUNK_SIZE * HEAD_DIM_STRIDE) * sizeof(inner_scalar_t);
 
         offset = round_up(offset, alignof(inner_scalar_t));
         layout.out_reduction = reinterpret_cast<inner_scalar_t*>(smem + offset);
-        offset += (Q_CHUNK_SIZE * HEAD_DIM_STRIDE) * sizeof(inner_scalar_t);
+        offset += (param.q_per_kv_group * Q_CHUNK_SIZE * HEAD_DIM_STRIDE) * sizeof(inner_scalar_t);
 
         offset = round_up(offset, alignof(inner_scalar_t));
         layout.score_reduction = reinterpret_cast<inner_scalar_t*>(smem + offset);
-        offset += (Q_CHUNK_SIZE * KV_CHUNK_SIZE) * sizeof(inner_scalar_t);
+        offset += (param.q_per_kv_group * Q_CHUNK_SIZE * KV_CHUNK_SIZE) * sizeof(inner_scalar_t);
 
         offset = round_up(offset, alignof(inner_scalar_t));
         layout.warp_max = reinterpret_cast<inner_scalar_t*>(smem + offset);
@@ -247,15 +248,15 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
         
         offset = round_up(offset, alignof(scalar_t));
         layout.softmax_reduction = reinterpret_cast<scalar_t*>(smem + offset);
-        offset += (Q_CHUNK_SIZE * KV_CHUNK_SIZE) * sizeof(scalar_t);
+        offset += (param.q_per_kv_group * Q_CHUNK_SIZE * KV_CHUNK_SIZE) * sizeof(scalar_t);
 
         offset = round_up(offset, alignof(inner_scalar_t));
         layout.last_chunk_max = reinterpret_cast<inner_scalar_t*>(smem + offset);
-        offset += (Q_CHUNK_SIZE * 1) * sizeof(inner_scalar_t);
+        offset += (param.q_per_kv_group * Q_CHUNK_SIZE * 1) * sizeof(inner_scalar_t);
         
         offset = round_up(offset, alignof(inner_scalar_t));
         layout.last_chunk_sum = reinterpret_cast<inner_scalar_t*>(smem + offset);
-        offset += (Q_CHUNK_SIZE * 1) * sizeof(inner_scalar_t);
+        offset += (param.q_per_kv_group * Q_CHUNK_SIZE * 1) * sizeof(inner_scalar_t);
 
         {   // deprecate
         offset = round_up(offset, alignof(int32_t));
@@ -470,7 +471,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
         //     cute::Swizzle<5, 1>{},
             cute::make_layout(
                 cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
-                cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::Int<1>{})
+                cute::LayoutRight{}
             )
         // )
     );
@@ -496,23 +497,23 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
     );
     auto sTensor_out = cute::make_tensor(
         cute::make_smem_ptr(layout.out),
-        cute::composition(
-            cute::Swizzle<5, 0>{},
+        // cute::composition(
+        //     cute::Swizzle<5, 0>{},
             cute::make_layout(
-                cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
-                cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::Int<1>{})
+                cute::make_shape(param.q_per_kv_group, cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
+                cute::LayoutRight{}
             )
-        )
+        // )
     );
     auto sTensor_score = cute::make_tensor(
         cute::make_smem_ptr(layout.score_reduction),
-        cute::composition(
-            cute::Swizzle<5, 0>{},
+        // cute::composition(
+        //     cute::Swizzle<5, 0>{},
             cute::make_layout(
-                cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
-                cute::make_stride(cute::Int<KV_CHUNK_SIZE>{}, cute::_1{})
+                cute::make_shape(param.q_per_kv_group, cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
+                cute::LayoutRight{}
             )
-        )
+        // )
     );
     auto sTensor_warp_max = cute::make_tensor(
         cute::make_smem_ptr(layout.warp_max),
@@ -526,23 +527,23 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
     );
     auto sTensor_softmax = cute::make_tensor(
         cute::make_smem_ptr(layout.softmax_reduction),
-        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
-        cute::make_stride(cute::Int<KV_CHUNK_SIZE>{}, cute::_1{})
+        cute::make_shape(param.q_per_kv_group, cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
+        cute::LayoutRight{}
     );
     auto sTensor_out_reduction = cute::make_tensor(
         cute::make_smem_ptr(layout.out_reduction),
-        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
-        cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::Int<1>{})
+        cute::make_shape(param.q_per_kv_group, cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
+        cute::LayoutRight{}
     );
     auto sTensor_last_max = cute::make_tensor(
         cute::make_smem_ptr(layout.last_chunk_max),
-        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}),
-        cute::make_stride(cute::_1{})
+        cute::make_shape(param.q_per_kv_group,cute::Int<Q_CHUNK_SIZE>{}),
+        cute::LayoutRight{}
     );
     auto sTensor_last_sum = cute::make_tensor(
         cute::make_smem_ptr(layout.last_chunk_sum),
-        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}),
-        cute::make_stride(cute::_1{})
+        cute::make_shape(param.q_per_kv_group,cute::Int<Q_CHUNK_SIZE>{}),
+        cute::LayoutRight{}
     );
 
     auto sTensor_k_cache = cute::make_tensor(
@@ -557,56 +558,6 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
         cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::_1{})
     );
 
-    {
-        cute::Tensor gQ_chunk = cute::local_tile(
-            gTensor_Q_batch(cute::_, param.q_head_id(), cute::_),   // 取当前head得到一个2维 tile
-            cute::shape(sTensor_q),
-            cute::make_coord(param.q_chunk_id(), cute::Int<0>{})
-        );
-        cute::Tensor Q_id = cute::make_identity_tensor(cute::shape(gTensor_Q_batch));
-        cute::Tensor Q_id_chunk = cute::local_tile(
-            Q_id(cute::_, param.q_head_id(), cute::_),
-            cute::shape(sTensor_q),
-            cute::make_coord(param.q_chunk_id(), cute::Int<0>{})
-        );
-
-        constexpr int thr_data = sizeof(cute::uint128_t) / sizeof(scalar_t);
-        constexpr int thr_col = HEAD_DIM_STRIDE / thr_data;
-        constexpr int thr_row = THR_NUM / thr_col;
-        cute::Layout thr_layout = cute::make_layout(
-            cute::make_shape(cute::Int<thr_row>{}, cute::Int<thr_col>{}),
-            cute::LayoutRight{}
-        );
-        cute::Layout val_layout = cute::make_layout(
-            cute::make_shape(cute::_1{}, cute::Int<thr_data>{}),
-            cute::LayoutRight{}
-        );
-
-        auto copy_atom = cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>, scalar_t>{};
-        cute::TiledCopy copy_a = cute::make_tiled_copy(
-            copy_atom,
-            thr_layout, val_layout
-        );
-        if (threadIdx.x < cute::size(copy_a)) {
-            cute::ThrCopy copy = copy_a.get_slice(threadIdx.x);
-            cute::Tensor src = copy.partition_S(gQ_chunk);
-            cute::Tensor src_id = copy.partition_S(Q_id_chunk);
-            cute::Tensor dst = copy.partition_D(sTensor_q);
-            cute::Tensor pred = cute::make_tensor<bool>(cute::shape(src));
-            
-            CUTE_UNROLL
-            for(int i=0; i < cute::size(pred); i++) {
-                auto coord = src_id(i);
-                pred(i) = cute::elem_less(src_id(i), cute::shape(gTensor_Q_batch));
-            }
-            // cute::fill(dst, scalar_t{0});
-            // cute::copy_if(pred, src, dst);
-            cute::copy(copy_a, src, dst);
-            cute::cp_async_fence();
-        }
-        cute::cp_async_wait<0>();   // Q就绪
-        __syncthreads();
-    }
     int32_t last_phy_block_id = -1;
 
     for(int64_t kv_chunk_id = kv_chunk_end - 1;
@@ -688,379 +639,439 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
             }
             __syncthreads();
         }
-        {   // QK matmul use mma
-            // q_chunk， k_chunk, head_dim_chunk
-            // 
-            auto mma = cute::make_tiled_mma(
-                cute::MMA_Atom<cute::SM80_16x8x16_F32BF16BF16F32_TN>{}, // 固定 MMA_Q_CHUNK_SIZE = Q_CHUNK_SIZE所以shape(0) = 1
-                cute::Layout<cute::Shape<cute::_1, cute::Int<KV_CHUNK_SIZE/MMA_N>, cute::_1>>{}  // M N K K方向循环，N方向warp处理，M固定单warp
-            );
-            auto thr_mma = mma.get_thread_slice(threadIdx.x);
-            auto tCsAcc = thr_mma.partition_C(sTensor_score);
-            auto tCrAcc = cute::make_fragment_like(tCsAcc);
-            cute::clear(tCrAcc);
-            for(int i=0; i<HEAD_DIM_STRIDE / MMA_K; i++){
-                auto q_chunk = cute::local_tile(sTensor_q,
-                    cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<MMA_K>{}),
-                    cute::make_coord(cute::_0{}, i)
+        for(int local_q_head = 0; local_q_head < param.q_per_kv_group; local_q_head++) {
+            {   // load q
+                cute::Tensor gQ_chunk = cute::local_tile(
+                    gTensor_Q_batch(cute::_, param.q_head_id(local_q_head), cute::_),   // 取当前head得到一个2维 tile
+                    cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
+                    cute::make_coord(param.q_chunk_id(), cute::Int<0>{})
                 );
-                auto k_chunk = cute::local_tile(sTensor_k,
-                    cute::make_shape(cute::Int<KV_CHUNK_SIZE>{}, cute::Int<MMA_K>{}),
-                    cute::make_coord(cute::_0{}, i)
-                );
-                auto tCsQ = thr_mma.partition_A(q_chunk);
-                auto tCsK = thr_mma.partition_B(k_chunk);
-                auto tCrQ = cute::make_fragment_like(tCsQ);
-                auto tCrK = cute::make_fragment_like(tCsK);
-                cute::copy(tCsQ, tCrQ);
-                cute::copy(tCsK, tCrK);
-                cute::gemm(thr_mma, tCrQ, tCrK, tCrAcc);
-            }
-            cute::copy(tCrAcc, tCsAcc);
-            __syncthreads();
-            // 结合窗口，过滤掉无效部分
-            for(int linear = threadIdx.x; linear < cute::size(sTensor_score); linear += THR_NUM) {
-                auto coord = cute::idx2crd(linear, cute::shape(sTensor_score));
-                auto [q_off, kv_off] = coord;
-                auto q_token_id = Q_CHUNK_SIZE * param.q_chunk_id() + q_off;
-                auto kv_seq_id = KV_CHUNK_SIZE * kv_chunk_id + kv_off;
-                bool valid_score = q_token_id < param.q_seqlen() &&
-                    layout.is_valid_kv(q_token_id, kv_seq_id, q_kv_offset, kv_win);
-                if (!valid_score) {
-                    sTensor_score(coord) = inner_scalar_t{-INFINITY};
-                }
-            }
-            __syncthreads();
-#ifdef DEBUG_FLASH_ATTN_TRACE
-            if (param.batch_id() == 0 &&
-                param.q_head_id() == 0 &&
-                kv_chunk_id == kv_chunk_end - 1 &&
-                threadIdx.x == 0) {
-                printf("QK_TILE_V6 chunk=%lld\n", (long long)kv_chunk_id);
-                for (int q_row = 0; q_row < 2 && q_row < Q_CHUNK_SIZE; ++q_row) {
-                    printf("  row %d:", q_row);
-                    for (int seq_col = 0; seq_col < 8 && seq_col < KV_CHUNK_SIZE; ++seq_col) {
-                        printf(" %0.6f", (double)sTensor_score(q_row, seq_col));
-                    }
-                    printf("\n");
-                }
-            }
-#endif
-        }
-        {   // online softmax
-
-            // 先warp归约求chunk max & sum
-            toy_flash_attn_assert(THR_NUM >= KV_CHUNK_SIZE);
-            toy_flash_attn_assert(THR_NUM % WARP_SIZE == 0);
-            toy_flash_attn_assert(KV_CHUNK_SIZE % WARP_SIZE == 0);
-            for(int linear=threadIdx.x; linear<cute::size(sTensor_score); linear += THR_NUM) {
-                // auto coord = cute::idx2crd(linear, cute::Shape<cute::Int<KV_CHUNK_SIZE>, cute::Int<Q_CHUNK_SIZE>>{});
-                // auto coord = cute::idx2crd(linear, cute::shape(sTensor_score));
-                auto q_off = linear / KV_CHUNK_SIZE;
-                auto seq_off = linear % KV_CHUNK_SIZE;
-                auto val = sTensor_score(q_off, seq_off);
-                auto max_ = val;
-                auto sum_ = val == inner_scalar_t{-INFINITY} ? inner_scalar_t{0} : inner_scalar_t{1};
-                auto max_neighbor = __shfl_down_sync(0xffffffff, max_, 16);
-                auto sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 16);
-                auto max_merge = max(max_, max_neighbor);
-                auto sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old")) + 
-                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
-                                        "softmax_sum_reduction_warp");
-                max_ = max_merge;
-                sum_ = sum_merge;
-                
-                max_neighbor = __shfl_down_sync(0xffffffff, max_, 8);
-                sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 8);
-                max_merge = max(max_, max_neighbor);
-                sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old")) + 
-                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
-                                        "softmax_sum_reduction_warp");
-                max_ = max_merge;
-                sum_ = sum_merge;
-                                    
-                max_neighbor = __shfl_down_sync(0xffffffff, max_, 4);
-                sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 4);
-                max_merge = max(max_, max_neighbor);
-                sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old")) + 
-                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
-                                        "softmax_sum_reduction_warp");
-                max_ = max_merge;
-                sum_ = sum_merge;
-
-                max_neighbor = __shfl_down_sync(0xffffffff, max_, 2);
-                sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 2);
-                max_merge = max(max_, max_neighbor);
-                sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old")) + 
-                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
-                                        "softmax_sum_reduction_warp");
-                max_ = max_merge;
-                sum_ = sum_merge;
-
-                max_neighbor = __shfl_down_sync(0xffffffff, max_, 1);
-                sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 1);
-                max_merge = max(max_, max_neighbor);
-                sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old")) + 
-                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
-                                        "softmax_sum_reduction_warp");
-                max_ = max_merge;
-                sum_ = sum_merge;
-                
-                int warp_off = linear % WARP_SIZE;
-                // auto [q_off, seq_off] = coord;
-                auto warp_in_row = seq_off / WARP_SIZE;
-                if (warp_off == 0) {
-                    sTensor_warp_max(q_off, warp_in_row) = max_;
-                    sTensor_warp_sum(q_off, warp_in_row) = sum_;
-                }
-            }
-            __syncthreads();
-#ifdef DEBUG_FLASH_ATTN_TRACE
-            if (param.batch_id() == 0 &&
-                param.q_head_id() == 0 &&
-                kv_chunk_id == kv_chunk_end - 1 &&
-                threadIdx.x == 0) {
-                printf("WARP_STAGE1_V6 chunk=%lld\n", (long long)kv_chunk_id);
-                for (int q_row = 0; q_row < 2 && q_row < Q_CHUNK_SIZE; ++q_row) {
-                    printf("  row %d max:", q_row);
-                    for (int col = 0; col < KV_CHUNK_SIZE / WARP_SIZE; ++col) {
-                        printf(" %0.6f", (double)sTensor_warp_max(q_row, col));
-                    }
-                    printf("\n");
-                    printf("  row %d sum:", q_row);
-                    for (int col = 0; col < KV_CHUNK_SIZE / WARP_SIZE; ++col) {
-                        printf(" %0.6f", (double)sTensor_warp_sum(q_row, col));
-                    }
-                    printf("\n");
-                }
-            }
-#endif
-
-            constexpr auto subgroup = KV_CHUNK_SIZE / WARP_SIZE;
-            constexpr auto subgroup_num = WARP_SIZE / subgroup;
-            uint32_t base_mask = 0xffffffff;
-            toy_flash_attn_assert((subgroup & (subgroup-1)) == 0);  // 2的幂，便于warp内分组
-            if constexpr (subgroup == 1) {
-                base_mask = 0x1;
-            } else if constexpr (subgroup == 2) {
-                base_mask = 0x3;
-            } else if constexpr (subgroup == 4) {
-                base_mask = 0xf;
-            } else if constexpr (subgroup == 8) {
-                base_mask = 0xff;
-            } else if constexpr (subgroup == 16) {
-                base_mask = 0xffff;
-            } else if constexpr (subgroup == 32) {
-                base_mask = 0xffffffff;
-            } else {
-                toy_flash_attn_assert(false);
-            }
-            // warp分组归约
-            for (int linear = threadIdx.x; linear < cute::size(sTensor_warp_max); linear += THR_NUM) {
-                auto coord = cute::idx2crd(linear, cute::shape(sTensor_warp_max));
-                // auto warp_id = linear / WARP_SIZE;
-                auto warp_off = linear % WARP_SIZE;
-                auto group_id = warp_off / subgroup;
-                auto mask = base_mask << (group_id * subgroup);
-                auto max_ = sTensor_warp_max(coord);
-                auto sum_ = sTensor_warp_sum(coord);
-                auto max_neighbor = max_;
-                auto sum_neighbor = sum_;
-                auto max_merge = max_;
-                auto sum_merge = sum_;
-                switch (subgroup) {
-                case 32:
-                    max_neighbor = __shfl_down_sync(mask, max_, 16, subgroup);
-                    sum_neighbor = __shfl_down_sync(mask, sum_, 16, subgroup);
-                    max_merge = max(max_, max_neighbor);
-                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old2")) + 
-                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new2")), 
-                                        "softmax_sum_reduction_warp2");
-                    max_ = max_merge;
-                    sum_ = sum_merge;
-                    [[fallthrough]];
-                case 16:
-                    max_neighbor = __shfl_down_sync(mask, max_, 8, subgroup);
-                    sum_neighbor = __shfl_down_sync(mask, sum_, 8, subgroup);
-                    max_merge = max(max_, max_neighbor);
-                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old2")) + 
-                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new2")), 
-                                        "softmax_sum_reduction_warp2");
-                    max_ = max_merge;
-                    sum_ = sum_merge;
-                    [[fallthrough]];
-                case 8:
-                    max_neighbor = __shfl_down_sync(mask, max_, 4, subgroup);
-                    sum_neighbor = __shfl_down_sync(mask, sum_, 4, subgroup);
-                    max_merge = max(max_, max_neighbor);
-                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old2")) + 
-                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new2")), 
-                                        "softmax_sum_reduction_warp2");
-                    max_ = max_merge;
-                    sum_ = sum_merge;
-                    [[fallthrough]];
-                case 4:
-                    max_neighbor = __shfl_down_sync(mask, max_, 2, subgroup);
-                    sum_neighbor = __shfl_down_sync(mask, sum_, 2, subgroup);
-                    max_merge = max(max_, max_neighbor);
-                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old2")) + 
-                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new2")), 
-                                        "softmax_sum_reduction_warp2");
-                    max_ = max_merge;
-                    sum_ = sum_merge;
-                    [[fallthrough]];
-                case 2:
-                    max_neighbor = __shfl_down_sync(mask, max_, 1, subgroup);
-                    sum_neighbor = __shfl_down_sync(mask, sum_, 1, subgroup);
-                    max_merge = max(max_, max_neighbor);
-                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old2")) + 
-                                        sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new2")), 
-                                        "softmax_sum_reduction_warp2");
-                    max_ = max_merge;
-                    sum_ = sum_merge;
-                    [[fallthrough]];
-                case 1:
-                    break;
-                default:
-                    toy_flash_attn_assert(false);
-                };
-                auto [q_off, col_off] = coord;
-                if(col_off == 0) {
-                    sTensor_warp_max(q_off, 0) = max_;
-                    sTensor_warp_sum(q_off, 0) = sum_;
-                }   
-            }
-            __syncthreads();
-
-            // block 广播max, 回填softmax
-            for (int linear = threadIdx.x; linear < cute::size(sTensor_score); linear += THR_NUM) {
-                auto coord = cute::idx2crd(linear, cute::shape(sTensor_score));
-                auto [q_off, seq_off] = coord;
-                auto kv_seq_id = kv_chunk_id * KV_CHUNK_SIZE + seq_off;
-                auto q_token_id = param.q_chunk_id() * Q_CHUNK_SIZE + q_off;
-
-                auto max_ = sTensor_warp_max(q_off, 0);
-                bool is_valid = layout.is_valid_kv(q_token_id, kv_seq_id, q_kv_offset, kv_win);
-                auto score = sTensor_score(coord);
-                auto softmax = is_valid ? exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(score, max_), "softmax_exp_sub"))
-                    : inner_scalar_t(0);
-                sTensor_softmax(coord) = scalar_t{softmax};
-            }
-            __syncthreads();
-#ifdef DEBUG_FLASH_ATTN_TRACE
-            if (param.batch_id() == 0 &&
-                param.q_head_id() == 0 &&
-                kv_chunk_id == kv_chunk_end - 1 &&
-                threadIdx.x == 0) {
-                printf("P_TILE_V6 chunk=%lld\n", (long long)kv_chunk_id);
-                for (int q_row = 0; q_row < 2 && q_row < Q_CHUNK_SIZE; ++q_row) {
-                    printf("  row %d:", q_row);
-                    for (int seq_col = 0; seq_col < 8 && seq_col < KV_CHUNK_SIZE; ++seq_col) {
-                        printf(" %0.6f", (double)sTensor_softmax(q_row, seq_col));
-                    }
-                    printf("\n");
-                }
-            }
-#endif
-        }
-        {    // P @ V
-            constexpr int WARP_NUM = THR_NUM / WARP_SIZE;
-            constexpr int N_PER_PASS = WARP_NUM * MMA_N;
-            static_assert(HEAD_DIM_STRIDE % N_PER_PASS == 0);
-
-            auto mma = cute::make_tiled_mma(
-                cute::MMA_Atom<cute::SM80_16x8x16_F32BF16BF16F32_TN>{},
-                cute::Layout<cute::Shape<cute::_1, cute::Int<WARP_NUM>, cute::_1>>{}
-            );
-            auto thr_mma = mma.get_thread_slice(threadIdx.x);
-
-            for (int n_tile_id = 0; n_tile_id < HEAD_DIM_STRIDE / N_PER_PASS; ++n_tile_id) {
-                auto out_chunk = cute::local_tile(
-                    sTensor_out_reduction,
-                    cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<N_PER_PASS>{}),
-                    cute::make_coord(cute::_0{}, n_tile_id)
+                cute::Tensor Q_id = cute::make_identity_tensor(cute::shape(gTensor_Q_batch));
+                cute::Tensor Q_id_chunk = cute::local_tile(
+                    Q_id(cute::_, param.q_head_id(local_q_head), cute::_),
+                    cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
+                    cute::make_coord(param.q_chunk_id(), cute::Int<0>{})
                 );
 
-                auto tCs_out = thr_mma.partition_C(out_chunk);
-                auto tCr_out = cute::make_fragment_like(tCs_out);
-                cute::clear(tCr_out);
+                constexpr int thr_data = sizeof(cute::uint128_t) / sizeof(scalar_t);
+                constexpr int thr_col = HEAD_DIM_STRIDE / thr_data;
+                constexpr int thr_row = THR_NUM / thr_col;
+                cute::Layout thr_layout = cute::make_layout(
+                    cute::make_shape(cute::Int<thr_row>{}, cute::Int<thr_col>{}),
+                    cute::LayoutRight{}
+                );
+                cute::Layout val_layout = cute::make_layout(
+                    cute::make_shape(cute::_1{}, cute::Int<thr_data>{}),
+                    cute::LayoutRight{}
+                );
 
-                for (int mma_kv_chunk_id = 0; mma_kv_chunk_id < KV_CHUNK_SIZE / MMA_K; ++mma_kv_chunk_id) {
-                    auto softmax_chunk = cute::local_tile(
-                        sTensor_softmax,
+                auto copy_atom = cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>, scalar_t>{};
+                cute::TiledCopy copy_a = cute::make_tiled_copy(
+                    copy_atom,
+                    thr_layout, val_layout
+                );
+                if (threadIdx.x < cute::size(copy_a)) {
+                    cute::ThrCopy copy = copy_a.get_slice(threadIdx.x);
+                    cute::Tensor src = copy.partition_S(gQ_chunk);
+                    cute::Tensor src_id = copy.partition_S(Q_id_chunk);
+                    cute::Tensor dst = copy.partition_D(sTensor_q);
+                    cute::Tensor pred = cute::make_tensor<bool>(cute::shape(src));
+                    
+                    CUTE_UNROLL
+                    for(int i=0; i < cute::size(pred); i++) {
+                        auto coord = src_id(i);
+                        pred(i) = cute::elem_less(src_id(i), cute::shape(gTensor_Q_batch));
+                    }
+                    // cute::fill(dst, scalar_t{0});
+                    // cute::copy_if(pred, src, dst);
+                    cute::copy(copy_a, src, dst);
+                    cute::cp_async_fence();
+                }
+                cute::cp_async_wait<0>();   // Q就绪
+                __syncthreads();
+            }
+            auto local_q = sTensor_q;
+            auto local_out = sTensor_out(local_q_head, cute::_, cute::_);
+            auto local_score = sTensor_score(local_q_head, cute::_, cute::_);
+            auto local_softmax = sTensor_softmax(local_q_head, cute::_, cute::_);
+            auto local_out_reduction = sTensor_out_reduction(local_q_head, cute::_, cute::_);
+            auto local_last_max = sTensor_last_max(local_q_head, cute::_);
+            auto local_last_sum = sTensor_last_sum(local_q_head, cute::_);
+            {   // QK matmul use mma
+                // q_chunk， k_chunk, head_dim_chunk
+                // 
+                auto mma = cute::make_tiled_mma(
+                    cute::MMA_Atom<cute::SM80_16x8x16_F32BF16BF16F32_TN>{}, // 固定 MMA_Q_CHUNK_SIZE = Q_CHUNK_SIZE所以shape(0) = 1
+                    cute::Layout<cute::Shape<cute::_1, cute::Int<KV_CHUNK_SIZE/MMA_N>, cute::_1>>{}  // M N K K方向循环，N方向warp处理，M固定单warp
+                );
+                auto thr_mma = mma.get_thread_slice(threadIdx.x);
+                auto tCsAcc = thr_mma.partition_C(local_score);
+                auto tCrAcc = cute::make_fragment_like(tCsAcc);
+                cute::clear(tCrAcc);
+                for(int i=0; i<HEAD_DIM_STRIDE / MMA_K; i++){
+                    auto q_chunk = cute::local_tile(local_q,
                         cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<MMA_K>{}),
-                        cute::make_coord(cute::_0{}, mma_kv_chunk_id)
+                        cute::make_coord(cute::_0{}, i)
                     );
-                    auto v_chunk = cute::local_tile(
-                        sTensor_v_t,
-                        cute::make_shape(cute::Int<N_PER_PASS>{}, cute::Int<MMA_K>{}),
-                        cute::make_coord(n_tile_id, mma_kv_chunk_id)
+                    auto k_chunk = cute::local_tile(sTensor_k,
+                        cute::make_shape(cute::Int<KV_CHUNK_SIZE>{}, cute::Int<MMA_K>{}),
+                        cute::make_coord(cute::_0{}, i)
                     );
-
-                    auto tCs_softmax = thr_mma.partition_A(softmax_chunk);
-                    auto tCs_V_T = thr_mma.partition_B(v_chunk);
-                    auto tCr_softmax = cute::make_fragment_like(tCs_softmax);
-                    auto tCr_V_T = cute::make_fragment_like(tCs_V_T);
-
-                    cute::copy(tCs_softmax, tCr_softmax);
-                    cute::copy(tCs_V_T, tCr_V_T);
-                    cute::gemm(thr_mma, tCr_softmax, tCr_V_T, tCr_out);
+                    auto tCsQ = thr_mma.partition_A(q_chunk);
+                    auto tCsK = thr_mma.partition_B(k_chunk);
+                    auto tCrQ = cute::make_fragment_like(tCsQ);
+                    auto tCrK = cute::make_fragment_like(tCsK);
+                    cute::copy(tCsQ, tCrQ);
+                    cute::copy(tCsK, tCrK);
+                    cute::gemm(thr_mma, tCrQ, tCrK, tCrAcc);
                 }
-
-                cute::copy(tCr_out, tCs_out);
+                cute::copy(tCrAcc, tCsAcc);
+                __syncthreads();
+                // 结合窗口，过滤掉无效部分
+                for(int linear = threadIdx.x; linear < cute::size(local_score); linear += THR_NUM) {
+                    auto coord = cute::idx2crd(linear, cute::shape(local_score));
+                    auto [q_off, kv_off] = coord;
+                    auto q_token_id = Q_CHUNK_SIZE * param.q_chunk_id() + q_off;
+                    auto kv_seq_id = KV_CHUNK_SIZE * kv_chunk_id + kv_off;
+                    bool valid_score = q_token_id < param.q_seqlen() &&
+                        layout.is_valid_kv(q_token_id, kv_seq_id, q_kv_offset, kv_win);
+                    if (!valid_score) {
+                        local_score(coord) = inner_scalar_t{-INFINITY};
+                    }
+                }
+                __syncthreads();
+#ifdef DEBUG_FLASH_ATTN_TRACE
+                if (param.batch_id() == 0 &&
+                    param.kv_head_id() == 0 &&
+                    kv_chunk_id == kv_chunk_end - 1 &&
+                    threadIdx.x == 0) {
+                    printf("QK_TILE_V6 chunk=%lld\n", (long long)kv_chunk_id);
+                    for (int q_row = 0; q_row < 2 && q_row < Q_CHUNK_SIZE; ++q_row) {
+                        printf("  row %d:", q_row);
+                        for (int seq_col = 0; seq_col < 8 && seq_col < KV_CHUNK_SIZE; ++seq_col) {
+                            printf(" %0.6f", (double)local_score(q_row, seq_col));
+                        }
+                        printf("\n");
+                    }
+                }
+#endif
             }
-            __syncthreads();
-        }
+            {   // online softmax
 
-        {   // out reduction
-            for(int linear = threadIdx.x; linear < cute::size(sTensor_out_reduction); linear += THR_NUM) {
-                auto coord = cute::idx2crd(linear, cute::shape(sTensor_out_reduction));
-                auto [q_off, head_off] = coord;
-                auto max_new = sTensor_warp_max(q_off, 0);
-                auto sum_new = sTensor_warp_sum(q_off, 0);
-                auto max_old = sTensor_last_max(q_off);
-                auto sum_old = sTensor_last_sum(q_off);
-                auto max_merge = max(max_old, max_new);
+                // 先warp归约求chunk max & sum
+                toy_flash_attn_assert(THR_NUM >= KV_CHUNK_SIZE);
+                toy_flash_attn_assert(THR_NUM % WARP_SIZE == 0);
+                toy_flash_attn_assert(KV_CHUNK_SIZE % WARP_SIZE == 0);
+                for(int linear=threadIdx.x; linear<cute::size(local_score); linear += THR_NUM) {
+                    auto q_off = linear / KV_CHUNK_SIZE;
+                    auto seq_off = linear % KV_CHUNK_SIZE;
+                    auto val = local_score(q_off, seq_off);
+                    auto max_ = val;
+                    auto sum_ = val == inner_scalar_t{-INFINITY} ? inner_scalar_t{0} : inner_scalar_t{1};
+                    auto max_neighbor = __shfl_down_sync(0xffffffff, max_, 16);
+                    auto sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 16);
+                    auto max_merge = max(max_, max_neighbor);
+                    auto sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old")) + 
+                                            sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                                            "softmax_sum_reduction_warp");
+                    max_ = max_merge;
+                    sum_ = sum_merge;
+                    
+                    max_neighbor = __shfl_down_sync(0xffffffff, max_, 8);
+                    sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 8);
+                    max_merge = max(max_, max_neighbor);
+                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old")) + 
+                                            sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                                            "softmax_sum_reduction_warp");
+                    max_ = max_merge;
+                    sum_ = sum_merge;
+                                        
+                    max_neighbor = __shfl_down_sync(0xffffffff, max_, 4);
+                    sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 4);
+                    max_merge = max(max_, max_neighbor);
+                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old")) + 
+                                            sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                                            "softmax_sum_reduction_warp");
+                    max_ = max_merge;
+                    sum_ = sum_merge;
 
-                auto o_old = sTensor_out(coord);
-                auto o_new = sTensor_out_reduction(coord);
-                auto o_merge = check_non_finite_val(
-                            o_old * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_old, max_merge), "out_chunk_reduction_old_sub")) +
-                            o_new * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_new, max_merge), "out_chunk_reduction_new_sub"))  
-                        , "out_chunk_reduction");       // 去除sum除法，统一到最后
-                sTensor_out(coord) = o_merge;
-                toy_flash_attn_assert(THR_NUM >= HEAD_DIM_STRIDE);
+                    max_neighbor = __shfl_down_sync(0xffffffff, max_, 2);
+                    sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 2);
+                    max_merge = max(max_, max_neighbor);
+                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old")) + 
+                                            sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                                            "softmax_sum_reduction_warp");
+                    max_ = max_merge;
+                    sum_ = sum_merge;
+
+                    max_neighbor = __shfl_down_sync(0xffffffff, max_, 1);
+                    sum_neighbor = __shfl_down_sync(0xffffffff, sum_, 1);
+                    max_merge = max(max_, max_neighbor);
+                    sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old")) + 
+                                            sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new")), 
+                                            "softmax_sum_reduction_warp");
+                    max_ = max_merge;
+                    sum_ = sum_merge;
+                    
+                    int warp_off = linear % WARP_SIZE;
+                    // auto [q_off, seq_off] = coord;
+                    auto warp_in_row = seq_off / WARP_SIZE;
+                    if (warp_off == 0) {
+                        sTensor_warp_max(q_off, warp_in_row) = max_;
+                        sTensor_warp_sum(q_off, warp_in_row) = sum_;
+                    }
+                }
+                __syncthreads();
+#ifdef DEBUG_FLASH_ATTN_TRACE
+                if (param.batch_id() == 0 &&
+                    param.q_head_id() == 0 &&
+                    kv_chunk_id == kv_chunk_end - 1 &&
+                    threadIdx.x == 0) {
+                    printf("WARP_STAGE1_V6 chunk=%lld\n", (long long)kv_chunk_id);
+                    for (int q_row = 0; q_row < 2 && q_row < Q_CHUNK_SIZE; ++q_row) {
+                        printf("  row %d max:", q_row);
+                        for (int col = 0; col < KV_CHUNK_SIZE / WARP_SIZE; ++col) {
+                            printf(" %0.6f", (double)sTensor_warp_max(q_row, col));
+                        }
+                        printf("\n");
+                        printf("  row %d sum:", q_row);
+                        for (int col = 0; col < KV_CHUNK_SIZE / WARP_SIZE; ++col) {
+                            printf(" %0.6f", (double)sTensor_warp_sum(q_row, col));
+                        }
+                        printf("\n");
+                    }
+                }
+#endif
+
+                constexpr auto subgroup = KV_CHUNK_SIZE / WARP_SIZE;
+                constexpr auto subgroup_num = WARP_SIZE / subgroup;
+                uint32_t base_mask = 0xffffffff;
+                toy_flash_attn_assert((subgroup & (subgroup-1)) == 0);  // 2的幂，便于warp内分组
+                if constexpr (subgroup == 1) {
+                    base_mask = 0x1;
+                } else if constexpr (subgroup == 2) {
+                    base_mask = 0x3;
+                } else if constexpr (subgroup == 4) {
+                    base_mask = 0xf;
+                } else if constexpr (subgroup == 8) {
+                    base_mask = 0xff;
+                } else if constexpr (subgroup == 16) {
+                    base_mask = 0xffff;
+                } else if constexpr (subgroup == 32) {
+                    base_mask = 0xffffffff;
+                } else {
+                    toy_flash_attn_assert(false);
+                }
+                // warp分组归约
+                for (int linear = threadIdx.x; linear < cute::size(sTensor_warp_max); linear += THR_NUM) {
+                    auto coord = cute::idx2crd(linear, cute::shape(sTensor_warp_max));
+                    // auto warp_id = linear / WARP_SIZE;
+                    auto warp_off = linear % WARP_SIZE;
+                    auto group_id = warp_off / subgroup;
+                    auto mask = base_mask << (group_id * subgroup);
+                    auto max_ = sTensor_warp_max(coord);
+                    auto sum_ = sTensor_warp_sum(coord);
+                    auto max_neighbor = max_;
+                    auto sum_neighbor = sum_;
+                    auto max_merge = max_;
+                    auto sum_merge = sum_;
+                    switch (subgroup) {
+                    case 32:
+                        max_neighbor = __shfl_down_sync(mask, max_, 16, subgroup);
+                        sum_neighbor = __shfl_down_sync(mask, sum_, 16, subgroup);
+                        max_merge = max(max_, max_neighbor);
+                        sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old2")) + 
+                                            sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new2")), 
+                                            "softmax_sum_reduction_warp2");
+                        max_ = max_merge;
+                        sum_ = sum_merge;
+                        [[fallthrough]];
+                    case 16:
+                        max_neighbor = __shfl_down_sync(mask, max_, 8, subgroup);
+                        sum_neighbor = __shfl_down_sync(mask, sum_, 8, subgroup);
+                        max_merge = max(max_, max_neighbor);
+                        sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old2")) + 
+                                            sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new2")), 
+                                            "softmax_sum_reduction_warp2");
+                        max_ = max_merge;
+                        sum_ = sum_merge;
+                        [[fallthrough]];
+                    case 8:
+                        max_neighbor = __shfl_down_sync(mask, max_, 4, subgroup);
+                        sum_neighbor = __shfl_down_sync(mask, sum_, 4, subgroup);
+                        max_merge = max(max_, max_neighbor);
+                        sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old2")) + 
+                                            sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new2")), 
+                                            "softmax_sum_reduction_warp2");
+                        max_ = max_merge;
+                        sum_ = sum_merge;
+                        [[fallthrough]];
+                    case 4:
+                        max_neighbor = __shfl_down_sync(mask, max_, 2, subgroup);
+                        sum_neighbor = __shfl_down_sync(mask, sum_, 2, subgroup);
+                        max_merge = max(max_, max_neighbor);
+                        sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old2")) + 
+                                            sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new2")), 
+                                            "softmax_sum_reduction_warp2");
+                        max_ = max_merge;
+                        sum_ = sum_merge;
+                        [[fallthrough]];
+                    case 2:
+                        max_neighbor = __shfl_down_sync(mask, max_, 1, subgroup);
+                        sum_neighbor = __shfl_down_sync(mask, sum_, 1, subgroup);
+                        max_merge = max(max_, max_neighbor);
+                        sum_merge = check_non_finite_val(sum_ * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_,max_merge), "softmax_sum_reduction_warp_old2")) + 
+                                            sum_neighbor * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_neighbor, max_merge), "softmax_sum_reduction_warp_new2")), 
+                                            "softmax_sum_reduction_warp2");
+                        max_ = max_merge;
+                        sum_ = sum_merge;
+                        [[fallthrough]];
+                    case 1:
+                        break;
+                    default:
+                        toy_flash_attn_assert(false);
+                    };
+                    auto [q_off, col_off] = coord;
+                    if(col_off == 0) {
+                        sTensor_warp_max(q_off, 0) = max_;
+                        sTensor_warp_sum(q_off, 0) = sum_;
+                    }   
+                }
+                __syncthreads();
+
+                // block 广播max, 回填softmax
+                for (int linear = threadIdx.x; linear < cute::size(local_score); linear += THR_NUM) {
+                    auto coord = cute::idx2crd(linear, cute::shape(local_score));
+                    auto [q_off, seq_off] = coord;
+                    auto kv_seq_id = kv_chunk_id * KV_CHUNK_SIZE + seq_off;
+                    auto q_token_id = param.q_chunk_id() * Q_CHUNK_SIZE + q_off;
+
+                    auto max_ = sTensor_warp_max(q_off, 0);
+                    bool is_valid = layout.is_valid_kv(q_token_id, kv_seq_id, q_kv_offset, kv_win);
+                    auto score = local_score(coord);
+                    auto softmax = is_valid ? exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(score, max_), "softmax_exp_sub"))
+                        : inner_scalar_t(0);
+                    local_softmax(coord) = scalar_t{softmax};
+                }
+                __syncthreads();
+#ifdef DEBUG_FLASH_ATTN_TRACE
+                if (param.batch_id() == 0 &&
+                    param.q_head_id() == 0 &&
+                    kv_chunk_id == kv_chunk_end - 1 &&
+                    threadIdx.x == 0) {
+                    printf("P_TILE_V6 chunk=%lld\n", (long long)kv_chunk_id);
+                    for (int q_row = 0; q_row < 2 && q_row < Q_CHUNK_SIZE; ++q_row) {
+                        printf("  row %d:", q_row);
+                        for (int seq_col = 0; seq_col < 8 && seq_col < KV_CHUNK_SIZE; ++seq_col) {
+                            printf(" %0.6f", (double)local_softmax(q_row, seq_col));
+                        }
+                        printf("\n");
+                    }
+                }
+#endif
             }
-            __syncthreads();
-            toy_flash_attn_assert(THR_NUM >= Q_CHUNK_SIZE);
-            if (threadIdx.x < Q_CHUNK_SIZE) {   // TODO, 做成2个buffer
-                int q_off = threadIdx.x;
-                auto max_new = sTensor_warp_max(q_off, 0);
-                auto sum_new = sTensor_warp_sum(q_off, 0);
-                auto max_old = sTensor_last_max(q_off);
-                auto sum_old = sTensor_last_sum(q_off);
-                auto max_merge = max(max_old, max_new);
-                auto sum_merge = check_non_finite_val(
-                    sum_old * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_old, max_merge), "softmax_chunk_reduction_sum_old_sub")) + 
-                    sum_new * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_new, max_merge), "softmax_chunk_reduction_sum_new_sub"))
-                , "softmax_chunk_reduction_sum");
+            {    // P @ V
+                constexpr int WARP_NUM = THR_NUM / WARP_SIZE;
+                constexpr int N_PER_PASS = WARP_NUM * MMA_N;
+                static_assert(HEAD_DIM_STRIDE % N_PER_PASS == 0);
 
-                sTensor_last_max(q_off) = max_merge;
-                sTensor_last_sum(q_off) = sum_merge;
+                auto mma = cute::make_tiled_mma(
+                    cute::MMA_Atom<cute::SM80_16x8x16_F32BF16BF16F32_TN>{},
+                    cute::Layout<cute::Shape<cute::_1, cute::Int<WARP_NUM>, cute::_1>>{}
+                );
+                auto thr_mma = mma.get_thread_slice(threadIdx.x);
+
+                for (int n_tile_id = 0; n_tile_id < HEAD_DIM_STRIDE / N_PER_PASS; ++n_tile_id) {
+                    auto out_chunk = cute::local_tile(
+                        local_out_reduction,
+                        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<N_PER_PASS>{}),
+                        cute::make_coord(cute::_0{}, n_tile_id)
+                    );
+
+                    auto tCs_out = thr_mma.partition_C(out_chunk);
+                    auto tCr_out = cute::make_fragment_like(tCs_out);
+                    cute::clear(tCr_out);
+
+                    for (int mma_kv_chunk_id = 0; mma_kv_chunk_id < KV_CHUNK_SIZE / MMA_K; ++mma_kv_chunk_id) {
+                        auto softmax_chunk = cute::local_tile(
+                            local_softmax,
+                            cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<MMA_K>{}),
+                            cute::make_coord(cute::_0{}, mma_kv_chunk_id)
+                        );
+                        auto v_chunk = cute::local_tile(
+                            sTensor_v_t,
+                            cute::make_shape(cute::Int<N_PER_PASS>{}, cute::Int<MMA_K>{}),
+                            cute::make_coord(n_tile_id, mma_kv_chunk_id)
+                        );
+
+                        auto tCs_softmax = thr_mma.partition_A(softmax_chunk);
+                        auto tCs_V_T = thr_mma.partition_B(v_chunk);
+                        auto tCr_softmax = cute::make_fragment_like(tCs_softmax);
+                        auto tCr_V_T = cute::make_fragment_like(tCs_V_T);
+
+                        cute::copy(tCs_softmax, tCr_softmax);
+                        cute::copy(tCs_V_T, tCr_V_T);
+                        cute::gemm(thr_mma, tCr_softmax, tCr_V_T, tCr_out);
+                    }
+
+                    cute::copy(tCr_out, tCs_out);
+                }
+                __syncthreads();
             }
-            __syncthreads();
+
+            {   // out reduction
+                for(int linear = threadIdx.x; linear < cute::size(local_out_reduction); linear += THR_NUM) {
+                    auto coord = cute::idx2crd(linear, cute::shape(local_out_reduction));
+                    auto [q_off, head_off] = coord;
+                    auto max_new = sTensor_warp_max(q_off, 0);
+                    auto sum_new = sTensor_warp_sum(q_off, 0);
+                    auto max_old = local_last_max(q_off);
+                    auto sum_old = local_last_sum(q_off);
+                    auto max_merge = max(max_old, max_new);
+
+                    auto o_old = local_out(coord);
+                    auto o_new = local_out_reduction(coord);
+                    auto o_merge = check_non_finite_val(
+                                o_old * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_old, max_merge), "out_chunk_reduction_old_sub")) +
+                                o_new * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_new, max_merge), "out_chunk_reduction_new_sub"))  
+                            , "out_chunk_reduction");       // 去除sum除法，统一到最后
+                    local_out(coord) = o_merge;
+                    toy_flash_attn_assert(THR_NUM >= HEAD_DIM_STRIDE);
+                }
+                __syncthreads();
+                toy_flash_attn_assert(THR_NUM >= Q_CHUNK_SIZE);
+                if (threadIdx.x < Q_CHUNK_SIZE) {   // TODO, 做成2个buffer
+                    int q_off = threadIdx.x;
+                    auto max_new = sTensor_warp_max(q_off, 0);
+                    auto sum_new = sTensor_warp_sum(q_off, 0);
+                    auto max_old = local_last_max(q_off);
+                    auto sum_old = local_last_sum(q_off);
+                    auto max_merge = max(max_old, max_new);
+                    auto sum_merge = check_non_finite_val(
+                        sum_old * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_old, max_merge), "softmax_chunk_reduction_sum_old_sub")) + 
+                        sum_new * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_new, max_merge), "softmax_chunk_reduction_sum_new_sub"))
+                    , "softmax_chunk_reduction_sum");
+
+                    local_last_max(q_off) = max_merge;
+                    local_last_sum(q_off) = sum_merge;
+                }
+                __syncthreads();
+            }
         }
     }
     {
-        for(int linear = threadIdx.x; linear < cute::size(sTensor_out); linear += THR_NUM) {
-            auto coord = cute::idx2crd(linear, cute::shape(sTensor_out));
-            auto [q_off, head_off] = coord;
-            auto q_token_id = param.q_chunk_id() * Q_CHUNK_SIZE + q_off;
-            bool valid_pos = q_token_id < param.q_seqlen() && head_off < param.head_dim;
-            if (valid_pos) {
-                auto o = sTensor_out(coord);
-                auto sum_ = sTensor_last_sum(q_off); 
-                gTensor_out_batch(q_token_id, param.q_head_id(), head_off) = scalar_t(softmax_div(o, sum_)); 
+        for(int local_q_head = 0; local_q_head < param.q_per_kv_group; local_q_head++) {
+            auto local_out = sTensor_out(local_q_head, cute::_, cute::_);
+            for(int linear = threadIdx.x; linear < cute::size(local_out); linear += THR_NUM) {
+                auto coord = cute::idx2crd(linear, cute::shape(local_out));
+                auto [q_off, head_off] = coord;
+                auto q_token_id = param.q_chunk_id() * Q_CHUNK_SIZE + q_off;
+                bool valid_pos = q_token_id < param.q_seqlen() && head_off < param.head_dim;
+                if (valid_pos) {
+                    auto o = local_out(coord);
+                    auto sum_ = sTensor_last_sum(local_q_head, q_off); 
+                    gTensor_out_batch(q_token_id, param.q_head_id(local_q_head), head_off) = scalar_t(softmax_div(o, sum_)); 
+                }
             }
         }
     }
@@ -1118,7 +1129,7 @@ torch::Tensor FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SI
     assert(head_dim <= 128);        // 泛化
 
     dim3 block(THR_NUM);
-    dim3 grid(batch_size, (max_seqlen_q + Q_CHUNK_SIZE - 1)/Q_CHUNK_SIZE, num_q_heads);
+    dim3 grid(batch_size, (max_seqlen_q + Q_CHUNK_SIZE - 1)/Q_CHUNK_SIZE, num_kv_heads);
 
     ParamSet param = {
         .q = q.const_data_ptr<scalar_t>(),
