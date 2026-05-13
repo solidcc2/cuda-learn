@@ -232,11 +232,11 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
 
         offset = round_up(offset, alignof(inner_scalar_t));
         layout.out_reduction = reinterpret_cast<inner_scalar_t*>(smem + offset);
-        offset += (param.q_per_kv_group * Q_CHUNK_SIZE * HEAD_DIM_STRIDE) * sizeof(inner_scalar_t);
+        offset += (Q_CHUNK_SIZE * HEAD_DIM_STRIDE) * sizeof(inner_scalar_t);
 
         offset = round_up(offset, alignof(inner_scalar_t));
         layout.score_reduction = reinterpret_cast<inner_scalar_t*>(smem + offset);
-        offset += (param.q_per_kv_group * Q_CHUNK_SIZE * KV_CHUNK_SIZE) * sizeof(inner_scalar_t);
+        offset += (Q_CHUNK_SIZE * KV_CHUNK_SIZE) * sizeof(inner_scalar_t);
 
         offset = round_up(offset, alignof(inner_scalar_t));
         layout.warp_max = reinterpret_cast<inner_scalar_t*>(smem + offset);
@@ -248,7 +248,7 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
         
         offset = round_up(offset, alignof(scalar_t));
         layout.softmax_reduction = reinterpret_cast<scalar_t*>(smem + offset);
-        offset += (param.q_per_kv_group * Q_CHUNK_SIZE * KV_CHUNK_SIZE) * sizeof(scalar_t);
+        offset += (Q_CHUNK_SIZE * KV_CHUNK_SIZE) * sizeof(scalar_t);
 
         offset = round_up(offset, alignof(inner_scalar_t));
         layout.last_chunk_max = reinterpret_cast<inner_scalar_t*>(smem + offset);
@@ -510,7 +510,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
         // cute::composition(
         //     cute::Swizzle<5, 0>{},
             cute::make_layout(
-                cute::make_shape(param.q_per_kv_group, cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
+                cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
                 cute::LayoutRight{}
             )
         // )
@@ -527,22 +527,22 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
     );
     auto sTensor_softmax = cute::make_tensor(
         cute::make_smem_ptr(layout.softmax_reduction),
-        cute::make_shape(param.q_per_kv_group, cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
+        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
         cute::LayoutRight{}
     );
     auto sTensor_out_reduction = cute::make_tensor(
         cute::make_smem_ptr(layout.out_reduction),
-        cute::make_shape(param.q_per_kv_group, cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
+        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
         cute::LayoutRight{}
     );
     auto sTensor_last_max = cute::make_tensor(
         cute::make_smem_ptr(layout.last_chunk_max),
-        cute::make_shape(param.q_per_kv_group,cute::Int<Q_CHUNK_SIZE>{}),
+        cute::make_shape(param.q_per_kv_group, cute::Int<Q_CHUNK_SIZE>{}),
         cute::LayoutRight{}
     );
     auto sTensor_last_sum = cute::make_tensor(
         cute::make_smem_ptr(layout.last_chunk_sum),
-        cute::make_shape(param.q_per_kv_group,cute::Int<Q_CHUNK_SIZE>{}),
+        cute::make_shape(param.q_per_kv_group, cute::Int<Q_CHUNK_SIZE>{}),
         cute::LayoutRight{}
     );
 
@@ -690,11 +690,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                 cute::cp_async_wait<0>();   // Q就绪
                 __syncthreads();
             }
-            auto local_q = sTensor_q;
             auto local_out = sTensor_out(local_q_head, cute::_, cute::_);
-            auto local_score = sTensor_score(local_q_head, cute::_, cute::_);
-            auto local_softmax = sTensor_softmax(local_q_head, cute::_, cute::_);
-            auto local_out_reduction = sTensor_out_reduction(local_q_head, cute::_, cute::_);
             auto local_last_max = sTensor_last_max(local_q_head, cute::_);
             auto local_last_sum = sTensor_last_sum(local_q_head, cute::_);
             {   // QK matmul use mma
@@ -705,11 +701,11 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                     cute::Layout<cute::Shape<cute::_1, cute::Int<KV_CHUNK_SIZE/MMA_N>, cute::_1>>{}  // M N K K方向循环，N方向warp处理，M固定单warp
                 );
                 auto thr_mma = mma.get_thread_slice(threadIdx.x);
-                auto tCsAcc = thr_mma.partition_C(local_score);
+                auto tCsAcc = thr_mma.partition_C(sTensor_score);
                 auto tCrAcc = cute::make_fragment_like(tCsAcc);
                 cute::clear(tCrAcc);
                 for(int i=0; i<HEAD_DIM_STRIDE / MMA_K; i++){
-                    auto q_chunk = cute::local_tile(local_q,
+                    auto q_chunk = cute::local_tile(sTensor_q,
                         cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<MMA_K>{}),
                         cute::make_coord(cute::_0{}, i)
                     );
@@ -728,15 +724,15 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                 cute::copy(tCrAcc, tCsAcc);
                 __syncthreads();
                 // 结合窗口，过滤掉无效部分
-                for(int linear = threadIdx.x; linear < cute::size(local_score); linear += THR_NUM) {
-                    auto coord = cute::idx2crd(linear, cute::shape(local_score));
+                for(int linear = threadIdx.x; linear < cute::size(sTensor_score); linear += THR_NUM) {
+                    auto coord = cute::idx2crd(linear, cute::shape(sTensor_score));
                     auto [q_off, kv_off] = coord;
                     auto q_token_id = Q_CHUNK_SIZE * param.q_chunk_id() + q_off;
                     auto kv_seq_id = KV_CHUNK_SIZE * kv_chunk_id + kv_off;
                     bool valid_score = q_token_id < param.q_seqlen() &&
                         layout.is_valid_kv(q_token_id, kv_seq_id, q_kv_offset, kv_win);
                     if (!valid_score) {
-                        local_score(coord) = inner_scalar_t{-INFINITY};
+                        sTensor_score(coord) = inner_scalar_t{-INFINITY};
                     }
                 }
                 __syncthreads();
@@ -749,7 +745,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                     for (int q_row = 0; q_row < 2 && q_row < Q_CHUNK_SIZE; ++q_row) {
                         printf("  row %d:", q_row);
                         for (int seq_col = 0; seq_col < 8 && seq_col < KV_CHUNK_SIZE; ++seq_col) {
-                            printf(" %0.6f", (double)local_score(q_row, seq_col));
+                            printf(" %0.6f", (double)sTensor_score(q_row, seq_col));
                         }
                         printf("\n");
                     }
@@ -762,10 +758,10 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                 toy_flash_attn_assert(THR_NUM >= KV_CHUNK_SIZE);
                 toy_flash_attn_assert(THR_NUM % WARP_SIZE == 0);
                 toy_flash_attn_assert(KV_CHUNK_SIZE % WARP_SIZE == 0);
-                for(int linear=threadIdx.x; linear<cute::size(local_score); linear += THR_NUM) {
+                for(int linear=threadIdx.x; linear<cute::size(sTensor_score); linear += THR_NUM) {
                     auto q_off = linear / KV_CHUNK_SIZE;
                     auto seq_off = linear % KV_CHUNK_SIZE;
-                    auto val = local_score(q_off, seq_off);
+                    auto val = sTensor_score(q_off, seq_off);
                     auto max_ = val;
                     auto sum_ = val == inner_scalar_t{-INFINITY} ? inner_scalar_t{0} : inner_scalar_t{1};
                     auto max_neighbor = __shfl_down_sync(0xffffffff, max_, 16);
@@ -824,7 +820,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                 __syncthreads();
 #ifdef DEBUG_FLASH_ATTN_TRACE
                 if (param.batch_id() == 0 &&
-                    param.q_head_id() == 0 &&
+                    param.q_head_id(local_q_head) == 0 &&
                     kv_chunk_id == kv_chunk_end - 1 &&
                     threadIdx.x == 0) {
                     printf("WARP_STAGE1_V6 chunk=%lld\n", (long long)kv_chunk_id);
@@ -940,18 +936,18 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                 __syncthreads();
 
                 // block 广播max, 回填softmax
-                for (int linear = threadIdx.x; linear < cute::size(local_score); linear += THR_NUM) {
-                    auto coord = cute::idx2crd(linear, cute::shape(local_score));
+                for (int linear = threadIdx.x; linear < cute::size(sTensor_score); linear += THR_NUM) {
+                    auto coord = cute::idx2crd(linear, cute::shape(sTensor_score));
                     auto [q_off, seq_off] = coord;
                     auto kv_seq_id = kv_chunk_id * KV_CHUNK_SIZE + seq_off;
                     auto q_token_id = param.q_chunk_id() * Q_CHUNK_SIZE + q_off;
 
                     auto max_ = sTensor_warp_max(q_off, 0);
                     bool is_valid = layout.is_valid_kv(q_token_id, kv_seq_id, q_kv_offset, kv_win);
-                    auto score = local_score(coord);
+                    auto score = sTensor_score(coord);
                     auto softmax = is_valid ? exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(score, max_), "softmax_exp_sub"))
                         : inner_scalar_t(0);
-                    local_softmax(coord) = scalar_t{softmax};
+                    sTensor_softmax(coord) = scalar_t{softmax};
                 }
                 __syncthreads();
 #ifdef DEBUG_FLASH_ATTN_TRACE
@@ -963,7 +959,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                     for (int q_row = 0; q_row < 2 && q_row < Q_CHUNK_SIZE; ++q_row) {
                         printf("  row %d:", q_row);
                         for (int seq_col = 0; seq_col < 8 && seq_col < KV_CHUNK_SIZE; ++seq_col) {
-                            printf(" %0.6f", (double)local_softmax(q_row, seq_col));
+                            printf(" %0.6f", (double)sTensor_softmax(q_row, seq_col));
                         }
                         printf("\n");
                     }
@@ -983,7 +979,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
 
                 for (int n_tile_id = 0; n_tile_id < HEAD_DIM_STRIDE / N_PER_PASS; ++n_tile_id) {
                     auto out_chunk = cute::local_tile(
-                        local_out_reduction,
+                        sTensor_out_reduction,
                         cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<N_PER_PASS>{}),
                         cute::make_coord(cute::_0{}, n_tile_id)
                     );
@@ -994,7 +990,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
 
                     for (int mma_kv_chunk_id = 0; mma_kv_chunk_id < KV_CHUNK_SIZE / MMA_K; ++mma_kv_chunk_id) {
                         auto softmax_chunk = cute::local_tile(
-                            local_softmax,
+                            sTensor_softmax,
                             cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<MMA_K>{}),
                             cute::make_coord(cute::_0{}, mma_kv_chunk_id)
                         );
@@ -1020,8 +1016,8 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
             }
 
             {   // out reduction
-                for(int linear = threadIdx.x; linear < cute::size(local_out_reduction); linear += THR_NUM) {
-                    auto coord = cute::idx2crd(linear, cute::shape(local_out_reduction));
+                for(int linear = threadIdx.x; linear < cute::size(sTensor_out_reduction); linear += THR_NUM) {
+                    auto coord = cute::idx2crd(linear, cute::shape(sTensor_out_reduction));
                     auto [q_off, head_off] = coord;
                     auto max_new = sTensor_warp_max(q_off, 0);
                     auto sum_new = sTensor_warp_sum(q_off, 0);
@@ -1030,7 +1026,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                     auto max_merge = max(max_old, max_new);
 
                     auto o_old = local_out(coord);
-                    auto o_new = local_out_reduction(coord);
+                    auto o_new = sTensor_out_reduction(coord);
                     auto o_merge = check_non_finite_val(
                                 o_old * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_old, max_merge), "out_chunk_reduction_old_sub")) +
                                 o_new * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_new, max_merge), "out_chunk_reduction_new_sub"))  
