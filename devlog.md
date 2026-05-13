@@ -11,10 +11,10 @@
 
 ## Dev Log
 ### 20260513
-1. 将qkv head线程块分配方式内q改为每次单独载入，内部score & softmax等也对立使用，将单block smem从100KB压到50KB, 但是还是超过架构允许48KB的限制，需要进一步压减少。
+1. 将qkv head线程块分配方式内q改为每次单独载入，内部score & softmax等也对立使用，对q和softmax, score和out reduction时分复用smem,压减到对于qwen2.5 7:1的gqa可以47KB<48K,可以launch。
 
 ### 20260512
-1. 将qkv head线程块分配方式改为按照kv head，导致线程块使用的smem过多，运行时失败，待处理。
+1. 将qkv head线程块分配方式改为按照kv head，导致线程块使用的smem过多(100KB)，运行时失败，待处理。
 
 ### 20260508
 1. 通过对kv的读取做phy block的整块读，q, k, v的smem都采用swizzle,同步压低了bank conflict和global excessive sector到最初的1/3, 但是依旧在百万量级，duration有小幅度优化（1658 -> 1525），看起来现阶段两者相互掣肘，无法进入线性释放性能的阶段。

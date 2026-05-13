@@ -234,9 +234,10 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
         layout.out_reduction = reinterpret_cast<inner_scalar_t*>(smem + offset);
         offset += (Q_CHUNK_SIZE * HEAD_DIM_STRIDE) * sizeof(inner_scalar_t);
 
-        offset = round_up(offset, alignof(inner_scalar_t));
-        layout.score_reduction = reinterpret_cast<inner_scalar_t*>(smem + offset);
-        offset += (Q_CHUNK_SIZE * KV_CHUNK_SIZE) * sizeof(inner_scalar_t);
+        // offset = round_up(offset, alignof(inner_scalar_t));
+        // layout.score_reduction = reinterpret_cast<inner_scalar_t*>(smem + offset);
+        // offset += (Q_CHUNK_SIZE * KV_CHUNK_SIZE) * sizeof(inner_scalar_t);
+        layout.score_reduction = layout.out_reduction;  // 时分复用这块cache
 
         offset = round_up(offset, alignof(inner_scalar_t));
         layout.warp_max = reinterpret_cast<inner_scalar_t*>(smem + offset);
@@ -246,9 +247,10 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
         layout.warp_sum = reinterpret_cast<inner_scalar_t*>(smem + offset);
         offset += (Q_CHUNK_SIZE * KV_CHUNK_SIZE / WARP_SIZE) * sizeof(inner_scalar_t);
         
-        offset = round_up(offset, alignof(scalar_t));
-        layout.softmax_reduction = reinterpret_cast<scalar_t*>(smem + offset);
-        offset += (Q_CHUNK_SIZE * KV_CHUNK_SIZE) * sizeof(scalar_t);
+        // offset = round_up(offset, alignof(scalar_t));
+        // layout.softmax_reduction = reinterpret_cast<scalar_t*>(smem + offset);
+        // offset += (Q_CHUNK_SIZE * KV_CHUNK_SIZE) * sizeof(scalar_t);
+        layout.softmax_reduction = layout.q;    // softmax 和 q 时分复用
 
         offset = round_up(offset, alignof(inner_scalar_t));
         layout.last_chunk_max = reinterpret_cast<inner_scalar_t*>(smem + offset);
@@ -952,7 +954,7 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                 __syncthreads();
 #ifdef DEBUG_FLASH_ATTN_TRACE
                 if (param.batch_id() == 0 &&
-                    param.q_head_id() == 0 &&
+                    param.q_head_id(local_q_head) == 0 &&
                     kv_chunk_id == kv_chunk_end - 1 &&
                     threadIdx.x == 0) {
                     printf("P_TILE_V6 chunk=%lld\n", (long long)kv_chunk_id);
