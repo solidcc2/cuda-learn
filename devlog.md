@@ -13,6 +13,12 @@
 ### 20260513
 1. 将qkv head线程块分配方式内q改为每次单独载入，内部score & softmax等也对立使用，对q和softmax, score和out reduction时分复用smem,压减到对于qwen2.5 7:1的gqa可以47KB<48K,可以launch。
 
+| version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v7 | `void kernel_wrapper<c10::BFloat16, float, 16, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5>::ParamSet)` | 5803.52 | 0.27 | 78.43 | 8.33 | 0.15 | 2823359.0 | 32768.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, shared_bank_conflict_risk |
+
+bench结果可以看到，duration大幅上升，但是gmem sectors极大缩减，瓶颈更多受限于bank conflict（739459e09f92dbb36bfe6f37d7a13ad00fb1dba2）
+
 ### 20260512
 1. 将qkv head线程块分配方式改为按照kv head，导致线程块使用的smem过多(100KB)，运行时失败，待处理。
 
