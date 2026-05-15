@@ -601,6 +601,12 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                         param.bt_stride[0] * param.batch_id() +
                         param.bt_stride[1] * virt_block_id
                     ];
+                    __shared__ int32_t local_block_id;
+                    if (threadIdx.x == 0) {
+                        local_block_id = phy_block_id;
+                    }
+                    __syncthreads();
+                    phy_block_id = local_block_id;
                     if (last_phy_block_id != phy_block_id) {
                     // if (last_phy_block_id == -1) {
                         layout.fetch(phy_block_id, param.kv_head_id());
