@@ -10,6 +10,10 @@
 8. 浮点0乘法，可能会因为无关数值，引入正负0,如果为了严格数值对拍和稳定性，最好不要依赖数值计算带来的路径选择，包括+/-inf, +/-0
 
 ## Dev Log
+### 20260515
+1. 解决因为k v block 同步错误而导致的端到端结果不一致. 
+2. 现在还是有sectors的32768次冗余访问, 似乎是对整个kv block的访问访问次数翻倍了. 做单轮fetch实验时, 发现如果访存phy block id寄存器值是来自直接寻址smem的后走fetch, 也就是说block内每线程, 也就是LDE.BYPASS.128会,正常只有恰好的sector访问, 但是如果phy block id寄存器值来自于smem内存块,带有偏移计算, 则在fetch访存时可能会退化,产生2倍的sector (commitid cceaad3 & 14555e7)
+
 ### 20260513
 1. 将qkv head线程块分配方式内q改为每次单独载入，内部score & softmax等也对立使用，对q和softmax, score和out reduction时分复用smem,压减到对于qwen2.5 7:1的gqa可以47KB<48K,可以launch。
 
