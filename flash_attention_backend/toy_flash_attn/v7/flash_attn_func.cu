@@ -145,8 +145,13 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
         
         auto sTensor_out = cute::make_tensor(
             cute::make_smem_ptr(layout.out),
-            cute::make_shape(param.q_per_kv_group, cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
-            cute::LayoutRight{}
+            cute::composition(
+                cute::Swizzle<5, 0>{},
+                cute::make_layout(
+                    cute::make_shape(param.q_per_kv_group, cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
+                    cute::LayoutRight{}
+                )
+            )
         );
         auto sTensor_last_max = cute::make_tensor(
             cute::make_smem_ptr(layout.last_chunk_max),
@@ -458,23 +463,23 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
     );
     auto sTensor_out = cute::make_tensor(
         cute::make_smem_ptr(layout.out),
-        // cute::composition(
-        //     cute::Swizzle<5, 0>{},
+        cute::composition(
+            cute::Swizzle<5, 0>{},
             cute::make_layout(
                 cute::make_shape(param.q_per_kv_group, cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
                 cute::LayoutRight{}
             )
-        // )
+        )
     );
     auto sTensor_score = cute::make_tensor(
         cute::make_smem_ptr(layout.score_reduction),
-        // cute::composition(
-        //     cute::Swizzle<5, 0>{},
+        cute::composition(
+            cute::Swizzle<5, 0>{},
             cute::make_layout(
                 cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
                 cute::LayoutRight{}
             )
-        // )
+        )
     );
     auto sTensor_warp_max = cute::make_tensor(
         cute::make_smem_ptr(layout.warp_max),
@@ -493,8 +498,13 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
     );
     auto sTensor_out_reduction = cute::make_tensor(
         cute::make_smem_ptr(layout.out_reduction),
-        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
-        cute::LayoutRight{}
+        cute::composition(
+            cute::Swizzle<5, 0>{},
+            cute::make_layout(
+                cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
+                cute::LayoutRight{}
+            )
+        )
     );
     auto sTensor_last_max = cute::make_tensor(
         cute::make_smem_ptr(layout.last_chunk_max),
