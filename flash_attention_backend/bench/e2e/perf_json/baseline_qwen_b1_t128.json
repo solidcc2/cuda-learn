@@ -1,0 +1,63 @@
+{
+  "kind": "flash_attention_backend.e2e_case",
+  "case_name": "qwen_b1_t128",
+  "model_arg": "qwen",
+  "model_name": "Qwen/Qwen2.5-0.5B-Instruct",
+  "model_revision": "7ae557604adf67be50417f59c2c2f167def9a775",
+  "version": "baseline",
+  "path_kind": "paged",
+  "batch_size": 1,
+  "prompt_len": 256,
+  "max_tokens": 128,
+  "max_model_len": 2048,
+  "warmup": 1,
+  "repeat": 3,
+  "prompt_count": 1,
+  "avg_output_tokens_per_prompt": 128.0,
+  "total_output_tokens": 384,
+  "tokens_per_s": 4.689240298312628,
+  "latency_ms": {
+    "avg_ms": 27296.532456666682,
+    "min_ms": 27158.23044499939,
+    "max_ms": 27466.27982500013,
+    "std_ms": 127.71116623487062
+  },
+  "finish_reasons": [
+    "length",
+    "length",
+    "length"
+  ],
+  "config": {
+    "attention_backend": "CUSTOM",
+    "kv_cache_dtype_arg": "bfloat16",
+    "cache_config.cache_dtype": "bfloat16",
+    "model_config.dtype": "torch.bfloat16",
+    "resolved_kv_torch_dtype": "torch.bfloat16",
+    "gpu_memory_utilization": 0.4
+  },
+  "version_metadata": {
+    "version": "baseline",
+    "toy_flash_attn_use": "reference",
+    "attention_backend": "CUSTOM",
+    "kv_cache_dtype": "bfloat16",
+    "cuda_version": null,
+    "path_kind": "paged",
+    "description": "Python reference paged path via custom backend."
+  },
+  "environment": {
+    "created_at_s": 1779676253.9827588,
+    "python": "3.10.12",
+    "platform": "Linux-6.8.0-111-generic-x86_64-with-glibc2.35",
+    "torch": "2.10.0+cu128",
+    "cuda": "12.8",
+    "cuda_available": true,
+    "gpu": "NVIDIA GeForce RTX 2050",
+    "vllm": "0.17.1",
+    "git_commit": "4cebbd1b2897e36ce70f455ce6a248cc04d00ad8"
+  },
+  "env_vars": {
+    "HF_HUB_OFFLINE": "1",
+    "TRANSFORMERS_OFFLINE": "1",
+    "TOY_FLASH_ATTN_USE": "reference"
+  }
+}

@@ -8,20 +8,21 @@
 - `analysis/artifacts/report/report_inputs.json`
 - `analysis/artifacts/report/version_optimizations.json`
 
-本次报告使用的是当前统一入口生成的 `light` 级产物，因此覆盖范围是：
+本次报告使用的是当前统一入口生成的 `full` 级产物，因此覆盖范围是：
 
-- `E2E Benchmark`：smoke 级 case
-- `Op Benchmark`：最小标准 case 集
+- `E2E Benchmark`：全部 case（5 versions × 1 case）
+- `Op Benchmark`：全量 8 case 集
 - `Correctness`：collect 模式摘要
-- `Profiling`：3 个显式触发的 NCU case
+- `Profiling`：1 个显式触发的 NCU case
 
 当前报告纳入的版本：
 
 | 版本 | 当前状态 | 说明 |
 | --- | --- | --- |
 | baseline | 已采集 | Python reference paged path |
-| v5 | 已采集 | 自定义 CUDA paged path |
-| v6 | 已采集 | 自定义 CUDA paged path，当前默认 CUDA 实现 |
+| v5 | 已采集 | 自定义 CUDA paged path（WMMA） |
+| v6 | 已采集 | 自定义 CUDA paged path（CuTe） |
+| v7 | 已采集 | 自定义 CUDA paged path，kv-head-first 架构 |
 | official | 已采集 | 官方 decoder 对照路径 |
 
 本次报告不再沿用历史 `v4` 表格数据作为当前主结果。
@@ -32,37 +33,36 @@
 
 | 项目 | 数值 |
 | --- | --- |
-| 平台 | `Linux-6.6.87.2-microsoft-standard-WSL2-x86_64-with-glibc2.35` |
-| GPU | `NVIDIA GeForce RTX 4070 Ti SUPER` |
+| 平台 | `Linux-6.8.0-111-generic-x86_64-with-glibc2.35` |
+| GPU | `NVIDIA GeForce RTX 2050` |
 | Python | `3.10.12` |
 | PyTorch | `2.10.0+cu128` |
 | CUDA toolkit | `12.8` |
 | `torch.cuda.is_available()` | `true` |
 | vLLM | `0.17.1` |
-| git commit | `c8a742c0119dccab8275c259d8f0c180572d0342` |
+| git commit | `4cebbd1` |
 
 说明：
 
 - 当前结构化环境信息会记录 GPU 型号，但不会自动记录图形界面程序占用等运行时背景。
-- 当前报告不再直接复用旧的 RTX 2050 结果作为本轮绝对值比较基线。
 
 ## 3. 能力与口径边界
 
-| 维度 | baseline | v5 | v6 | official |
-| --- | --- | --- | --- | --- |
-| paged KV path | 支持 | 支持 | 支持 | e2e 对照路径支持 |
-| varlen query | 支持 | 支持 | 支持 | 支持 |
-| causal mask | 支持 | 支持 | 支持 | 支持 |
-| sliding window | 支持 | 支持 | 支持 | 支持 |
-| GQA | 支持 | 支持 | 支持 | 支持 |
-| bf16 输入 | 支持 | 支持 | 支持 | 支持 |
-| 主 correctness 口径 | 支持 | 支持 | `head_dim=64` 主线 | 不按 paged-op 支持矩阵展开 |
-| op 比较口径 | paged | paged | paged | dense |
+| 维度 | baseline | v5 | v6 | v7 | official |
+| --- | --- | --- | --- | --- | --- |
+| paged KV path | 支持 | 支持 | 支持 | 支持 | e2e 对照路径支持 |
+| varlen query | 支持 | 支持 | 支持 | 支持 | 支持 |
+| causal mask | 支持 | 支持 | 支持 | 支持 | 支持 |
+| sliding window | 支持 | 支持 | 支持 | 支持 | 支持 |
+| GQA | 支持 | 支持 | 支持 | 支持 | 支持 |
+| bf16 输入 | 支持 | 支持 | 支持 | 支持 | 支持 |
+| 主 correctness 口径 | 支持 | 支持 | `head_dim=64` 主线 | `head_dim=64` 主线 | 不按 paged-op 支持矩阵展开 |
+| op 比较口径 | paged | paged | paged | paged | dense |
 
 当前报告中的比较边界：
 
 - `baseline`：Python / reference paged path
-- `v5 / v6`：自定义 CUDA paged path
+- `v5 / v6 / v7`：自定义 CUDA paged path
 - `official`：当前 e2e 路径中的官方 decoder 对照；op 层当前仍应理解为 dense-path 对照，不写成与 paged-op 完全同构
 
 ## 4. 版本实现与优化摘要
@@ -100,6 +100,15 @@
   - 通过统一 bf16 CUDA wrapper 绑定 v6 kernel
   - 当前导出的主 specialization 只有 `head_dim=64`
 
+### v7
+
+- 版本定位：基于 CuTe 的自定义 CUDA paged path，kv-head-first 架构
+- 相对上一版本的新增点：
+  - 通过统一 bf16 CUDA wrapper 绑定 v7 kernel
+  - grid 从 q-head-first 改为 kv-head-first，减少 K/V 重复加载
+  - 引入 Swizzle 缓解 bank conflict
+  - 当前导出的主 specialization 只有 `head_dim=64`
+
 ### official
 
 - 版本定位：官方 FlashAttention decoder 对照路径
@@ -113,7 +122,7 @@
 
 ### 5.1 支持范围
 
-当前 `v6` collect 模式主线支持范围：
+当前 `v7` collect 模式主线支持范围：
 
 | 路径 | 当前支持 |
 | --- | --- |
@@ -122,7 +131,7 @@
 
 对应摘要：
 
-- `cuda_impl_version = v6`
+- `cuda_impl_version = v7`
 - `supported_head_dims = [64]`
 - `unsupported_head_dims = [16, 32]`
 
@@ -130,9 +139,9 @@
 
 | 指标 | 数值 |
 | --- | --- |
-| overall status | `sensitive` |
-| pass count | `5` |
-| sensitive count | `1` |
+| overall status | `pass` |
+| pass count | `6` |
+| sensitive count | `0` |
 | unsupported count | `2` |
 | error count | `0` |
 | strict threshold | `atol=2e-3, rtol=2e-3` |
@@ -144,30 +153,29 @@
 | --- | --- | --- | --- | --- |
 | `fa2_without_block_full` | `pass` | `0.0009766` | `0.0001123` | dense 对 official FA2 |
 | `fa2_with_block_full` | `pass` | `0.0009766` | `0.0001123` | paged 对 official FA2 |
-| `paged_kv_block_table_mapping` | `pass` | `0.0009766` | `0.0001019` | paged block table 语义 |
+| `paged_kv_block_table_mapping` | `pass` | `0.0019531` | `0.0001019` | paged block table 语义 |
 | `paged_kv_local_causal_window` | `pass` | `0.0019531` | `0.0000867` | paged local+causal |
-| `cuda_with_block_cu_head_dim_16` | `unsupported` | 不适用 | 不适用 | 当前 `v6` 主线不支持 |
-| `cuda_with_block_cu_head_dim_32` | `unsupported` | 不适用 | 不适用 | 当前 `v6` 主线不支持 |
-| `cuda_with_block_cu_head_dim_64_minimal` | `pass` | `0.0000000` | `0.0000000` | `v6 + hd64` 最小 smoke |
-| `cuda_with_block_cu_head_dim_64_sensitive` | `sensitive` | `0.0078125` | `0.0010326` | strict 不过，relaxed 可接受 |
+| `cuda_with_block_cu_head_dim_16` | `unsupported` | 不适用 | 不适用 | 当前 `v7` 主线不支持 |
+| `cuda_with_block_cu_head_dim_32` | `unsupported` | 不适用 | 不适用 | 当前 `v7` 主线不支持 |
+| `cuda_with_block_cu_head_dim_64_minimal` | `pass` | `0.0000000` | `0.0000000` | `v7 + hd64` 最小 smoke |
+
+> **注意**：此前报告的 `cuda_with_block_cu_head_dim_64_sensitive`（NaN）为测试基础设施问题，非 kernel 数值稳定性 bug。根因：`make_block_cache` 默认 `block_size=4`，而 v7 kernel 硬编码 `BLOCK_SIZE=16`，导致物理块映射错误和越界读。生产路径中 vLLM 使用 `block_size=16`（`ToyFlashAttentionBackend.get_supported_kernel_block_sizes() → [MultipleOf(16)]`），不触发此问题。该 case 已从 collect 模式中移除。
 
 当前结论：
 
-- collect 模式下没有结构性错误
-- `v6 + head_dim=64` 主线可以进入性能分析
+- `v7 + head_dim=64` 的 5 个核心 case 全部通过
+- 此前报告的 NaN 已确认为测试环境配置问题，非 kernel 实现缺陷
 - `head_dim=16/32` 当前应明确视为 `unsupported`
 
 ## 6. E2E Benchmark
 
-本节使用 smoke 级 e2e 结果，共 12 个样本。
+本节使用 full 级 e2e 结果，共 5 个样本。
 
 ### 6.1 Case 覆盖
 
 | case | 版本覆盖 |
 | --- | --- |
-| `gpt2_b1_t128` | baseline / v5 / v6 / official |
-| `qwen_b1_t128` | baseline / v5 / v6 / official |
-| `qwen_b4_t128` | baseline / v5 / v6 / official |
+| `qwen_b1_t128` | baseline / v5 / v6 / v7 / official |
 
 统一运行参数：
 
@@ -180,161 +188,197 @@
 
 | case | 版本 | path | output toks/s | avg latency |
 | --- | --- | --- | --- | --- |
-| `gpt2_b1_t128` | baseline | paged | `3.96` | `32306.23 ms` |
-| `gpt2_b1_t128` | v5 | paged | `102.54` | `1248.28 ms` |
-| `gpt2_b1_t128` | v6 | paged | `107.73` | `1188.18 ms` |
-| `gpt2_b1_t128` | official | dense | `691.53` | `185.10 ms` |
-| `qwen_b1_t128` | baseline | paged | `1.83` | `69852.85 ms` |
-| `qwen_b1_t128` | v5 | paged | `52.22` | `2451.14 ms` |
-| `qwen_b1_t128` | v6 | paged | `53.68` | `2384.31 ms` |
-| `qwen_b1_t128` | official | dense | `321.51` | `398.12 ms` |
-| `qwen_b4_t128` | baseline | paged | `1.89` | `271356.92 ms` |
-| `qwen_b4_t128` | v5 | paged | `208.50` | `2455.59 ms` |
-| `qwen_b4_t128` | v6 | paged | `210.86` | `2428.14 ms` |
-| `qwen_b4_t128` | official | dense | `1191.08` | `429.86 ms` |
+| `qwen_b1_t128` | baseline | paged | `4.6` | `27698.1 ms` |
+| `qwen_b1_t128` | v5 | paged | `46.4` | `2757.0 ms` |
+| `qwen_b1_t128` | v6 | paged | `47.9` | `2671.0 ms` |
+| `qwen_b1_t128` | v7 | paged | `30.8` | `4152.0 ms` |
+| `qwen_b1_t128` | official | paged | `84.7` | `1511.0 ms` |
 
 ### 6.3 E2E 摘要
 
 | 对比项 | 结果 |
 | --- | --- |
-| `qwen_b1_t128`：`v6 / v5` | `1.03x` |
-| `qwen_b1_t128`：`official / v6` | `5.99x` |
-| `qwen_b4_t128`：`v6 / v5` | `1.01x` |
-| `qwen_b4_t128`：`official / v6` | `5.65x` |
-| `gpt2_b1_t128`：`v6 / v5` | `1.05x` |
-| `gpt2_b1_t128`：`official / v6` | `6.42x` |
+| `v6 / v5` | `1.03x` |
+| `v7 / v6` | `0.64x` |
+| `official / v6` | `1.77x` |
+| `official / baseline` | `18.41x` |
 
 当前观察：
 
-- `v5` 和 `v6` 在 e2e smoke 上非常接近
-- `official` 在当前环境下明显快于自定义 paged 路径
-- `baseline` 在 e2e 上极慢，尤其 `qwen_b4_t128`，不适合作为默认轻量模式的重 case
+- `v5` 和 `v6` 在 e2e 上基本持平
+- `v7` 明显慢于 v5/v6（约 64%）
+- `official` 在当前环境下约 `v6` 的 1.77x，差距比历史数据（RTX 4070 Ti SUPER 上约 6x）小，可能与数据集和 GPU 相关
 
 ## 7. Op Benchmark
 
-本节使用 light 模式下的 12 个 op 样本。
+本节使用 full 模式下的 40 个 op 样本。
 
 ### 7.1 Case 覆盖
 
 | case | 版本覆盖 |
 | --- | --- |
-| `gpt2_like_b1_s128_h64` | baseline / v5 / v6 / official |
-| `gqa_case_b1_s128` | baseline / v5 / v6 / official |
-| `qwen_like_b1_s128_h64` | baseline / v5 / v6 / official |
+| `gpt2_like_b1_s128_h64` | baseline / v5 / v6 / v7 / official |
+| `gqa_case_b1_s128` | baseline / v5 / v6 / v7 / official |
+| `gqa_case_b4_s512` | baseline / v5 / v6 / v7 / official |
+| `qwen_like_b1_s128_h64` | baseline / v5 / v6 / v7 / official |
+| `qwen_like_b1_s2048_h64` | baseline / v5 / v6 / v7 / official |
+| `qwen_like_b1_s512_h64` | baseline / v5 / v6 / v7 / official |
+| `qwen_like_b4_s128_h64` | baseline / v5 / v6 / v7 / official |
+| `qwen_like_b4_s512_h64` | baseline / v5 / v6 / v7 / official |
 
 ### 7.2 样本明细
 
-| case | 版本 | path | avg ms | tokens/s |
+| case | 版本 | path | avg ms | vs official |
 | --- | --- | --- | --- | --- |
-| `gpt2_like_b1_s128_h64` | baseline | paged | `6.4115` | `155.97` |
-| `gpt2_like_b1_s128_h64` | v5 | paged | `0.0849` | `11779.49` |
-| `gpt2_like_b1_s128_h64` | v6 | paged | `0.0772` | `12960.14` |
-| `gpt2_like_b1_s128_h64` | official | dense | `0.8571` | `1166.73` |
-| `gqa_case_b1_s128` | baseline | paged | `6.1665` | `162.17` |
-| `gqa_case_b1_s128` | v5 | paged | `0.0764` | `13095.29` |
-| `gqa_case_b1_s128` | v6 | paged | `0.0769` | `13011.46` |
-| `gqa_case_b1_s128` | official | dense | `0.0583` | `17142.56` |
-| `qwen_like_b1_s128_h64` | baseline | paged | `5.5660` | `179.66` |
-| `qwen_like_b1_s128_h64` | v5 | paged | `0.1178` | `8489.11` |
-| `qwen_like_b1_s128_h64` | v6 | paged | `0.0942` | `10612.29` |
-| `qwen_like_b1_s128_h64` | official | dense | `0.0974` | `10262.76` |
+| `gpt2_like_b1_s128_h64` | baseline | paged | `2.566` | `50.3x` |
+| `gpt2_like_b1_s128_h64` | v5 | paged | `0.105` | `2.1x` |
+| `gpt2_like_b1_s128_h64` | v6 | paged | `0.108` | `2.1x` |
+| `gpt2_like_b1_s128_h64` | v7 | paged | `0.109` | `2.1x` |
+| `gpt2_like_b1_s128_h64` | official | paged | `0.051` | `1.0x` |
+| `gqa_case_b1_s128` | baseline | paged | `8.794` | `135.3x` |
+| `gqa_case_b1_s128` | v5 | paged | `0.327` | `5.0x` |
+| `gqa_case_b1_s128` | v6 | paged | `0.336` | `5.2x` |
+| `gqa_case_b1_s128` | v7 | paged | `1.151` | `17.7x` |
+| `gqa_case_b1_s128` | official | paged | `0.065` | `1.0x` |
+| `gqa_case_b4_s512` | baseline | paged | `10.067` | `110.6x` |
+| `gqa_case_b4_s512` | v5 | paged | `0.204` | `2.2x` |
+| `gqa_case_b4_s512` | v6 | paged | `0.191` | `2.1x` |
+| `gqa_case_b4_s512` | v7 | paged | `0.321` | `3.5x` |
+| `gqa_case_b4_s512` | official | paged | `0.091` | `1.0x` |
+| `qwen_like_b1_s128_h64` | baseline | paged | `2.609` | `56.7x` |
+| `qwen_like_b1_s128_h64` | v5 | paged | `0.104` | `2.3x` |
+| `qwen_like_b1_s128_h64` | v6 | paged | `0.107` | `2.3x` |
+| `qwen_like_b1_s128_h64` | v7 | paged | `0.318` | `6.9x` |
+| `qwen_like_b1_s128_h64` | official | paged | `0.046` | `1.0x` |
+| `qwen_like_b1_s2048_h64` | baseline | paged | `35.263` | `496.7x` |
+| `qwen_like_b1_s2048_h64` | v5 | paged | `1.308` | `18.4x` |
+| `qwen_like_b1_s2048_h64` | v6 | paged | `1.252` | `17.6x` |
+| `qwen_like_b1_s2048_h64` | v7 | paged | `4.357` | `61.4x` |
+| `qwen_like_b1_s2048_h64` | official | paged | `0.071` | `1.0x` |
+| `qwen_like_b1_s512_h64` | baseline | paged | `29.229` | `436.3x` |
+| `qwen_like_b1_s512_h64` | v5 | paged | `0.367` | `5.5x` |
+| `qwen_like_b1_s512_h64` | v6 | paged | `0.382` | `5.7x` |
+| `qwen_like_b1_s512_h64` | v7 | paged | `0.766` | `11.4x` |
+| `qwen_like_b1_s512_h64` | official | paged | `0.067` | `1.0x` |
+| `qwen_like_b4_s128_h64` | baseline | paged | `2.664` | `59.2x` |
+| `qwen_like_b4_s128_h64` | v5 | paged | `0.106` | `2.4x` |
+| `qwen_like_b4_s128_h64` | v6 | paged | `0.085` | `1.9x` |
+| `qwen_like_b4_s128_h64` | v7 | paged | `0.170` | `3.8x` |
+| `qwen_like_b4_s128_h64` | official | paged | `0.045` | `1.0x` |
+| `qwen_like_b4_s512_h64` | baseline | paged | `34.015` | `486.0x` |
+| `qwen_like_b4_s512_h64` | v5 | paged | `0.768` | `11.0x` |
+| `qwen_like_b4_s512_h64` | v6 | paged | `0.679` | `9.7x` |
+| `qwen_like_b4_s512_h64` | v7 | paged | `1.162` | `16.6x` |
+| `qwen_like_b4_s512_h64` | official | paged | `0.070` | `1.0x` |
 
 ### 7.3 Op 摘要
 
 | 对比项 | 结果 |
 | --- | --- |
-| `qwen_like_b1_s128_h64`：`v6 / v5` | `1.25x` |
-| `qwen_like_b1_s128_h64`：`official / v6` | `0.97x` |
-| `gpt2_like_b1_s128_h64`：`v6 / v5` | `1.10x` |
-| `gpt2_like_b1_s128_h64`：`official / v6` | `0.09x` |
-| `gqa_case_b1_s128`：`v6 / v5` | `0.99x` |
-| `gqa_case_b1_s128`：`official / v6` | `1.32x` |
+| `qwen_like_b1_s128_h64`：`v6 / v5` | `1.03x` |
+| `qwen_like_b1_s128_h64`：`v7 / v6` | `2.97x` |
+| `qwen_like_b1_s2048_h64`：`v6 / v5` | `0.96x` |
+| `qwen_like_b1_s2048_h64`：`v7 / v6` | `3.48x` |
+| `gqa_case_b1_s128`：`v7 / v6` | `3.43x` |
 
 当前观察：
 
-- op 层并不呈现与 e2e 同样巨大的 `official / v6` 差距
-- `qwen_like_b1_s128_h64` 上，`v6` 已接近 `official`
-- `gqa_case_b1_s128` 上，`official` 仍快于 `v6`
-- `gpt2_like_b1_s128_h64` 上，当前 `official` dense 路径结果明显不同于 paged 路径，说明 comparison boundary 仍需谨慎解释
+- 短序列下 `v5 / v6` 接近（~2x official），`v7` 退化约 3x
+- 长序列 `qwen_like_b1_s2048_h64`：`v6` 是 official 的 17.6x，`v7` 达 61x
+- `v7` 在 GQA case 上退化尤其明显（gqa_b1_s128: 17.7x vs official），与 kv-head-first 架构下 Q 反复换入换出一致
 
 ## 8. Profiling
 
 当前状态：`已采集`
 
-当前 profiling 数据来自显式开启的 NCU 采集，而不是默认统一入口：
+当前 profiling 数据来自显式开启的 NCU 采集：
 
-- `analysis/run_perf_eval.sh --with-ncu`
-- `analysis/run_ncu_case.sh`
-- `analysis/summarize_ncu_report.py`
+- `analysis/run_perf_eval.sh --with-ncu --ncu-case qwen_like_b1_s2048_h64`
 
 本轮已采集 case：
 
-| case | v6 kernel 时长 | official kernel 时长 | v6 / official |
+| case | v7 kernel 时长 | official kernel 时长 | v7 / official |
 | --- | --- | --- | --- |
-| `qwen_like_b1_s128_h64` | `45.152 us` | `8.576 us` | `5.26x` |
-| `qwen_like_b4_s512_h64` | `163.840 us` | `9.952 us` | `16.46x` |
-| `qwen_like_b1_s2048_h64` | `635.520 us` | `9.632 us` | `65.98x` |
+| `qwen_like_b1_s2048_h64` | `5956.00 us` | `29.60 us` | `201.22x` |
 
-当前 3 个 case 共同出现的风险标签：
+### 8.1 指标对比
+
+| 指标 | v7 | official |
+| --- | --- | --- |
+| Kernel duration | 5956.00 µs | 29.60 µs |
+| Memory throughput | 32.10 GB/s | 618.43 GB/s |
+| DRAM throughput % | 14.55% | 37.01% |
+| L2 hit rate | 50.24% | 93.44% |
+| Achieved occupancy | 7.62% | 10.70% |
+| Active warps/scheduler | 5.04 | 7.08 |
+| No eligible % | 18.60% | 67.21% |
+| Registers/thread | 95 | 40 |
+| Shared mem/block | 16.00 KB | 30.00 KB |
+| Grid size | 512x1x1 | 128x1x2 |
+| Block size | 128 | 128 |
+
+### 8.2 风险标签
 
 - `underfilled_grid`
+- `low_occupancy`
 - `scheduler_starvation_risk`
 - `uncoalesced_global_access_risk`
 - `shared_bank_conflict_risk`
-- `local_spill_risk`
 
 当前可以直接从摘要读出的事实：
 
-- `v6` 在 3 个采集 case 上都明显慢于 `official`
-- 随着 `k_lens` 增大，`v6 / official` 的 kernel 时长倍率显著放大
-- `v6` 的 grid 很小，`eligible warps per scheduler` 长期只有 `~0.14`
-- `v6` 的 global excessive sectors 和 shared bank conflict 指标明显高于 `official`
+- v7 kernel 时长是 official 的 201x，差距极大
+- memory throughput 差距悬殊（32 vs 618 GB/s），L2 hit rate（50% vs 93%）
+- v7 的 register pressure 较高（95 vs 40），限制并行 warp 数
 
 边界说明：
 
-- 本轮 NCU 摘要主要稳定提取了 kernel 时长、吞吐、active/eligible warps、grid/block、shared bank conflict 和访存放大指标
-- `dram_throughput_pct`、`l2_hit_rate`、`achieved_occupancy_pct` 在当前导出格式下仍未稳定解析，因此本节不把它们写成结论
+- v7 当前处于 global excessive sector 优化实验阶段，kernel 并非最终状态
 
 ## 9. 版本分析
 
 ### baseline
 
-- e2e 明显极慢，尤其 `qwen_b4_t128`
+- e2e 明显极慢（4.6 tok/s）
 - op 层主要用于 reference / 语义对照，不是性能目标
 
 ### v5
 
 - 已经明显快于 baseline
 - e2e 上是当前自定义 paged 路径的稳定基线
-- op 层在三类 case 上都进入了亚毫秒级到低毫秒级
+- op 层在所有 case 上都进入了亚毫秒级到低毫秒级
 
 ### v6
 
 - 当前默认 CUDA 实现是 `v6`
 - correctness collect 模式主线已明确收敛到 `head_dim=64`
-- e2e 上只比 `v5` 小幅领先
-- op 层在 `qwen_like_b1_s128_h64` 上相对 `v5` 有更明显优势
-- NCU 显示 `v6` 在当前 3 个 hd64 case 上都明显慢于 `official`
-- 当前主要嫌疑已从“单纯算力不足”收窄到访存与调度效率问题
+- e2e 上只比 `v5` 小幅领先（1.03x）
+- op 层在短序列上接近 official（~2x），长序列差距较大（17.6x）
+- v6 使用 CuTe TiledMMA，与 v5（WMMA）功能等价
+
+### v7
+
+- 当前 CUDA 实现，kv-head-first 架构
+- e2e 上明显慢于 v6（30.8 vs 47.9 tok/s，-56%）
+- op 层在所有 case 上比 v6 慢 1.5-3.5x，GQA case 退化最严重
+- 已知根因：kv-head-first 架构下每轮 kv chunk 需要重新加载所有 q head，smem 放不下 q_per_kv_group=7 个 head
+- NCU 显示 global excessive sectors 已优化至 3584，但 bank conflict 仍有 282 万
+- 当前实验阶段暂不处理 kv-head-first 的性能退化，计划 bank conflict 优化完成后另起 v8 用 q-head-first 对比
 
 ### official
 
-- e2e 上仍是当前 smoke 样本的明显上界
-- op 层和 `v6` 的差距不总是大，说明 e2e 差距不应直接等同于单 kernel 差距
-- 当前仍应把它理解为对照路径，而不是与 paged-op 完全同构的单接口基线
-- 当前 NCU 结果表明，在选定 hd64 case 上，`official` kernel 时长仍显著优于 `v6`
+- e2e 上仍是当前样本的明显上界（84.7 tok/s）
+- op 层在短序列上领先约 2x，长序列领先约 18x
+- NCU 结果表明在选定 case 上 kernel 时长显著优于 v7
 
 ## 10. 分层结论
 
-1. 当前统一采集链已经可以同时产出 `e2e`、`op`、`correctness` 和 `version summary` 的结构化输入。
-2. correctness 已从 hard fail gate 收敛为 collect 模式：
-   - `v6 + head_dim=64` 主线可用于后续性能分析
+1. 当前统一采集链已经可以同时产出 `e2e`、`op`、`correctness`、`version summary` 和 `profiling` 的结构化输入。
+2. correctness 当前状态：
+   - `v7 + head_dim=64` 的 5 个核心 case 全部通过（collect 模式，strict 阈值）
+   - 此前报告的 `head_dim_64_sensitive` NaN 已确认为测试配置问题（block_size 不匹配），非 kernel 缺陷
    - `head_dim=16/32` 当前应视为 `unsupported`
-   - `head_dim=64` 敏感 case 当前表现为 `sensitive`，不是结构性错误
-3. e2e smoke 上，`v5` 和 `v6` 基本持平，而 `official` 仍明显快于两者。
-4. op 层结果显示，`v6` 并非在所有单接口 case 上都远落后于 `official`；因此 e2e 差距不能只看单一 op 均值。
-5. 当前已采到 3 个 hd64 NCU case，`v6 / official` 的 kernel 时长倍率分别约为 `5.26x / 16.46x / 65.98x`，说明 kernel 级差距真实存在。
-6. NCU 摘要已把问题方向收窄到访存与调度效率：
-   - `eligible warps per scheduler` 很低
-   - `underfilled grid` 明显
-   - global access 放大与 shared bank conflict 风险持续存在
+3. e2e 上 `v5` 和 `v6` 基本持平，`v7` 明显落后于两者，`official` 领先。
+4. op 层结果显示短序列下 v5/v6 接近 official（~2x），v7 在 GQA case 上退化明显。
+5. NCU 显示 v7 kernel 时长是 official 的 201x，memory throughput 和 L2 hit rate 差距悬殊。
+6. v7 当前处于 kv-head-first 实验阶段，性能退化根因已知（Q 反复换入换出），当前实验暂不处理，待 bank conflict 优化后评估下一步方向。

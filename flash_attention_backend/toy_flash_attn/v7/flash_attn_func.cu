@@ -136,47 +136,6 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
     int64_t _kv_seqlen=0;
 };
 
-// linear -> CacheBlock(phy_id, kcache, vcache, emit)
-
-template<typename scalar_t, typename inner_scalar_t, int Q_CHUNK_SIZE, int KV_CHUNK_SIZE, int HEAD_DIM_STRIDE>
-class FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEAD_DIM_STRIDE>::KVCacheRing { // -> KVCachePrefetcher
-    using KvCacheTensor = decltype(
-        cute::make_tensor(
-            cute::make_smem_ptr((scalar_t*)nullptr),
-            cute::make_shape(cute::Int<KV_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
-            cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::_1{})
-        )
-    );
-
-    struct CacheBlock {
-        int32_t phy_id;
-        KvCacheTensor k;
-        KvCacheTensor v;
-        int32_t cnt;
-    };
-    // __device__ CacheBlock* try_get(int32_t phy_id) {
-    //     if (threadIdx.x < RING_CAP) {
-            
-    //     }
-    // }
-    // // 如果不在缓存块中，则增加到ring中
-    // __device__ bool add_to_ring(int32_t phy_id) {
-    //     if (threadIdx.x == 0) {
-
-    //     }
-    //     cute::thread0()
-
-    //     CacheBlock* cb = ring[cache_tail];
-    // }
-
-private:
-    static constexpr int32_t RING_CAP = 16;
-    static constexpr int32_t RING_ELEM_NUM = KV_CHUNK_SIZE;
-
-    CacheBlock ring[RING_ELEM_NUM];
-    int32_t cache_head, cache_tail;
-};
-
 template<typename scalar_t, typename inner_scalar_t, int Q_CHUNK_SIZE, int KV_CHUNK_SIZE, int HEAD_DIM_STRIDE>
 struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEAD_DIM_STRIDE>::TileLayout {
     static __device__ inline TileLayout builder(char* smem, const ParamSet& param) {

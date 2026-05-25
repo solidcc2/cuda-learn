@@ -4,7 +4,7 @@
 
 ## 构建与测试
 
-> **Python 环境**：所有命令需在 vllm 虚拟环境中执行。先激活环境：`source ../vllm_env/bin/activate`。对 bash 脚本（如 `run_ncu_case.sh`）可通过 `PYTHON_BIN=../vllm_env/bin/python` 指定解释器路径。
+> **Python 环境**：所有命令需在 vllm 虚拟环境中执行。先激活环境：`source ./vllm_env/bin/activate && cd flash_attention_backend`。
 
 ### CUDA kernel 编译
 CUDA kernel 在 import 时通过 `torch.utils.cpp_extension.load` 进行 JIT 编译。`toy_flash_attn/flash_attention_func.py` 被导入时触发编译，无需单独执行构建步骤。切换版本后首次导入需等待约 30 秒。
@@ -23,8 +23,6 @@ export TOY_FLASH_ATTN_USE=bf16            # bf16 CUDA kernel
 
 ### 运行正确性测试
 ```bash
-cd flash_attention_backend
-
 # 全部正确性测试
 TOY_FLASH_ATTN_CUDA_VERSION=v7 python -m pytest tests/correctness/ -v
 
@@ -38,25 +36,21 @@ TOY_FLASH_ATTN_CUDA_VERSION=v7 python -m pytest \
 
 ### 运行算子级性能测试
 ```bash
-cd flash_attention_backend
 python bench/op/bench_attention_op.py --version v7 --case qwen_like_b1_s128_h64
 ```
 
 ### 运行 NCU 性能分析
 ```bash
-cd flash_attention_backend
 bash analysis/run_ncu_case.sh --case qwen_like_b1_s2048_h64 --versions v7,official
 ```
 
-### 端到端 vLLM 推理验证
+### 端到端 vLLM 推理验证（自动化）
 ```bash
-cd flash_attention_backend
-TOY_FLASH_ATTN_CUDA_VERSION=v7 python test_self_flash_attn_backend.py -m qwen -b 1 -t 128
+bash bench/e2e/collect_e2e.sh
 ```
 
 ### 完整性能评估流程
 ```bash
-cd flash_attention_backend
 bash analysis/run_perf_eval.sh
 ```
 
@@ -84,7 +78,7 @@ flash_attention_backend/
     v3/ ~ v7/                       ← 各版本 kernel，包含：
       flash_attn_func.cu              ← CUDA kernel（ParamSet, TileLayout, kernel(), launcher, PYBIND11）
       helper.h                        ← 断言宏、nan/isfinite 检查、round_up、softmax_sub/div
-  在 v7/ 当前分支实验状态：部分 Q/V/out 操作被注释，只保留单次 K 读取，用于定向测试 global excessive sectors
+  在 v7/ 当前分支实验状态：KVCacheRing（cache_block_table 预读）方法体被注释，仅保留 struct 骨架；其他 Q 加载、K/V cache 拷贝、MMA、softmax、P@V、out 写回均完整激活
 
   tests/correctness/              ← 正确性验证（与官方 FA2 对拍）
     test_fa2_parity.py              ← 非 paged（dense）路径正确性
