@@ -10,6 +10,20 @@
 8. 浮点0乘法，可能会因为无关数值，引入正负0,如果为了严格数值对拍和稳定性，最好不要依赖数值计算带来的路径选择，包括+/-inf, +/-0
 
 ## Dev Log
+### 20260522
+
+| version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v7 | `void kernel_wrapper<c10::BFloat16, float, 16, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5>::ParamSet)` | 5955.552 | 0.23 | 54.55 | 8.34 | 0.15 | 2823106.0 | 3584.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, shared_bank_conflict_risk |
+| official | `void flash::flash_fwd_splitkv_kernel<Flash_fwd_kernel_traits<64, 64, 256, 4, 0, 0, cutlass::bfloat16_t, Flash_kernel_traits<64, 64, 256, 4, cutlass::bfloat16_t>>, 0, 0, 0, 0, 1, 0, 1, 0>(flash::Flash_fwd_params)` | 29.6 | 43.17 | 10.28 | 8.52 | 0.11 | 0.0 | 908.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, local_spill_risk |
+
+精确定位 `memory_therorical_l2_sectors_global` 和 `memory_therorical_l2_sectors_global_ideal` 的引入源头, 主要来源于2方面:
+1. kv读取时,每个线程都读block table导致ideal值膨胀, 通过广播, 降低了ideal, 但是实际却增加了excessive, 从32768变为57344. 
+2. q读取时, 因为没copy if, 我的单kernel case, token_len=1, 所以实际有效数据只有1个token, 而实际读取时却是按照q chunk=16读的,引入了16倍ideal和实际读取, 通过启用copy_if后,将ideal从94680降低到40920, excessive从57344降低到3584. 也即excessive/chunk从896降低到56. 
+3. 剩下的这56 excessive/chunk的引入源分析为, 单行q载入时,我是按照128bit读的, 但是由于kv block的内存排布是(block_id, block_off, head_id, head_off), 所以每128B是同head的连续block, 我每8个线程读取128B, 是连续读, 一个warp 32个线程会跨4个block off, 导致不连续, 此时导致统计上劣化.
+
+另: 当前v7的性能kv优先q的架构,性能是有劣化的, 因为实际每轮kv chunk,由于smem不够大,无法缓存7个head的q在smem提供每轮计算, 导致引入每kv chunk都得循环的读并失效. 但是对于固定token len = 1的情况, 是放的下的, 但是需要引入额外架构改造. 本次试验暂不引入. 当前global sectors的优化已经接近极限, 在完成bank conflict优化后, 会单独将历史上的按照q优先再找回作为v8 单独优化看效果. 
+
 ### 20260515
 1. 解决因为k v block 同步错误而导致的端到端结果不一致. 
 2. 现在还是有sectors的32768次冗余访问, 似乎是对整个kv block的访问访问次数翻倍了. 做单轮fetch实验时, 发现如果访存phy block id寄存器值是来自直接寻址smem的后走fetch, 也就是说block内每线程, 也就是LDE.BYPASS.128会,正常只有恰好的sector访问, 但是如果phy block id寄存器值来自于smem内存块,带有偏移计算, 则在fetch访存时可能会退化,产生2倍的sector (commitid cceaad3 & 14555e7)

@@ -46,7 +46,7 @@ struct FlashAttnTrait {
     struct ParamSet;
     struct TileLayout;
     struct KVCacheRing;
-    static __device__ void kernel(ParamSet& param);
+    static __device__ inline void kernel(ParamSet& param);
     static void check_inputs(
         torch::Tensor q,
         torch::Tensor k,
@@ -402,7 +402,7 @@ private:
 };
 
 template<typename scalar_t, typename inner_scalar_t, int Q_CHUNK_SIZE, int KV_CHUNK_SIZE, int HEAD_DIM_STRIDE>
-__device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEAD_DIM_STRIDE>::kernel(ParamSet& param) {
+__device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEAD_DIM_STRIDE>::kernel(ParamSet& param) {
     extern __shared__ char smem[];
     param.device_init();
     TileLayout layout = TileLayout::builder(smem, param);
@@ -597,10 +597,17 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
 
                     // auto phy_block_id = 
                     //     layout.cache_block_table[virt_block_id - virt_block_begin];
-                    auto phy_block_id = param.block_table[
-                        param.bt_stride[0] * param.batch_id() +
-                        param.bt_stride[1] * virt_block_id
-                    ];
+                    // auto phy_block_id = param.block_table[
+                    //     param.bt_stride[0] * param.batch_id() +
+                    //     param.bt_stride[1] * virt_block_id
+                    // ];
+                    __shared__ __align__(16) int32_t phy_block_id;
+                    if (threadIdx.x == 0) {
+                        phy_block_id = param.block_table[
+                            param.bt_stride[0] * param.batch_id() +
+                            param.bt_stride[1] * virt_block_id
+                        ];
+                    }
                     __syncthreads();
                     if (last_phy_block_id != phy_block_id) {
                     // if (last_phy_block_id == -1) {
@@ -686,8 +693,8 @@ __device__ void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_
                         pred(i) = cute::elem_less(src_id(i), cute::shape(gTensor_Q_batch));
                     }
                     // cute::fill(dst, scalar_t{0});
-                    // cute::copy_if(pred, src, dst);
-                    cute::copy(copy_a, src, dst);
+                    cute::copy_if(copy_a, pred, src, dst);
+                    // cute::copy(copy_a, src, dst);
                     cute::cp_async_fence();
                 }
                 cute::cp_async_wait<0>();   // Q就绪
