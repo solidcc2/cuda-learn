@@ -194,7 +194,7 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
         layout.out = reinterpret_cast<inner_scalar_t*>(smem + offset);
         offset += (param.q_per_kv_group * Q_CHUNK_SIZE * HEAD_DIM_STRIDE) * sizeof(inner_scalar_t);
 
-        offset = round_up(offset, alignof(inner_scalar_t));
+        offset = round_up(offset, alignof(cute::uint128_t));
         layout.out_reduction = reinterpret_cast<inner_scalar_t*>(smem + offset);
         offset += (Q_CHUNK_SIZE * HEAD_DIM_STRIDE) * sizeof(inner_scalar_t);
 
@@ -202,6 +202,7 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
         // layout.score_reduction = reinterpret_cast<inner_scalar_t*>(smem + offset);
         // offset += (Q_CHUNK_SIZE * KV_CHUNK_SIZE) * sizeof(inner_scalar_t);
         layout.score_reduction = layout.out_reduction;  // 时分复用这块cache
+        layout.q_raw = reinterpret_cast<scalar_t*>(layout.out_reduction);    // 时分复用
 
         offset = round_up(offset, alignof(inner_scalar_t));
         layout.warp_max = reinterpret_cast<inner_scalar_t*>(smem + offset);
@@ -340,6 +341,7 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
     scalar_t* q;
     scalar_t* k;
     scalar_t* v;
+    scalar_t* q_raw;
     inner_scalar_t* out;
 
     inner_scalar_t* out_reduction;
@@ -367,7 +369,7 @@ private:
 
 template<typename scalar_t, typename inner_scalar_t, int Q_CHUNK_SIZE, int KV_CHUNK_SIZE, int HEAD_DIM_STRIDE>
 __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEAD_DIM_STRIDE>::kernel(ParamSet& param) {
-    extern __shared__ char smem[];
+    extern __shared__ __align__(16) char smem[];
     param.device_init();
     TileLayout layout = TileLayout::builder(smem, param);
 
@@ -431,15 +433,23 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
         cute::make_stride(param.out_stride[0], param.out_stride[1], param.out_stride[2])
     );
 
+    auto sTensor_q_raw = cute::make_tensor(
+        cute::make_smem_ptr(layout.q_raw),
+        cute::make_layout(
+            cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
+            cute::LayoutRight{}
+        )
+    );
+
     auto sTensor_q = cute::make_tensor(
         cute::make_smem_ptr(layout.q),
-        // cute::composition(
-        //     cute::Swizzle<5, 1>{},
+        cute::composition(
+            cute::Swizzle<3, 3>{},
             cute::make_layout(
                 cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
                 cute::LayoutRight{}
             )
-        // )
+        )
     );
     auto sTensor_k = cute::make_tensor(
         cute::make_smem_ptr(layout.k),
@@ -653,7 +663,7 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
                     cute::ThrCopy copy = copy_a.get_slice(threadIdx.x);
                     cute::Tensor src = copy.partition_S(gQ_chunk);
                     cute::Tensor src_id = copy.partition_S(Q_id_chunk);
-                    cute::Tensor dst = copy.partition_D(sTensor_q);
+                    cute::Tensor dst = copy.partition_D(sTensor_q_raw);
                     cute::Tensor pred = cute::make_tensor<bool>(cute::shape(src));
                     
                     CUTE_UNROLL
@@ -667,6 +677,14 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
                     cute::cp_async_fence();
                 }
                 cute::cp_async_wait<0>();   // Q就绪
+                __syncthreads();
+                for(int i = threadIdx.x * 8; i < cute::size(sTensor_q_raw); i += THR_NUM * 8) {
+                    auto col = i % HEAD_DIM_STRIDE;
+                    auto q_off = i / HEAD_DIM_STRIDE;
+                    if (q_off + param.q_chunk_id() * Q_CHUNK_SIZE < param.q_seqlen()) {
+                        *reinterpret_cast<uint4*>(&sTensor_q(q_off, col)) = *reinterpret_cast<const uint4*>(&sTensor_q_raw(q_off, col));
+                    }
+                }
                 __syncthreads();
             }
             auto local_out = sTensor_out(local_q_head, cute::_, cute::_);

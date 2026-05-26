@@ -10,6 +10,11 @@
 8. 浮点0乘法，可能会因为无关数值，引入正负0,如果为了严格数值对拍和稳定性，最好不要依赖数值计算带来的路径选择，包括+/-inf, +/-0
 
 ## Dev Log
+### 20260526
+1. 增加swizzle, 并将bf16类型的swizzle从swizzle<5,1>改为swizzle<3,3>, 将bank conflict从最初280w降低到67.8w(q增加了permute和swizzle<3,3>, 其他依旧是swizzle<5,1>), 这里最初使用5,1的想法是, bf16 需要2个元素才占据1个4B bank, 32个bank,需要5个4B打乱,因此mbase设置为1,保持2个bf16连续,最低2个bf16打乱无意义, 让32个bank打乱. 但是这样会导致mma矩阵乘法时, 每线程读8元素,16B时必须分4次32bit读,而不能合并访存为单次128bit, 所以改回swizzle<3,3>, 并且因为gmem的u128 async载入,必须地址连续, 因此增加了一个buffer用于q载入, 然后依照swizzle<3, 3>底层128b连续做permute. 通过ncu-ui看, 可以看到q读取的bank conflict彻底清0, 包括语句都没有发生bank conflict
+    - `*reinterpret_cast<uint4*>(&sTensor_q(q_off, col)) = *reinterpret_cast<const uint4*>(&sTensor_q_raw(q_off, col))`
+    - `cute::copy(tCsQ, tCrQ)`
+
 ### 20260522
 
 | version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
