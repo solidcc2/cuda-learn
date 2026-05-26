@@ -454,7 +454,7 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
     auto sTensor_k = cute::make_tensor(
         cute::make_smem_ptr(layout.k),
         cute::composition(
-            cute::Swizzle<5, 1>{},
+            cute::Swizzle<3, 3>{},
             cute::make_layout(
                 cute::make_shape(cute::Int<KV_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
                 cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::Int<1>{})
@@ -663,6 +663,7 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
                     cute::ThrCopy copy = copy_a.get_slice(threadIdx.x);
                     cute::Tensor src = copy.partition_S(gQ_chunk);
                     cute::Tensor src_id = copy.partition_S(Q_id_chunk);
+                    // cute::Tensor dst = copy.partition_D(sTensor_q);
                     cute::Tensor dst = copy.partition_D(sTensor_q_raw);
                     cute::Tensor pred = cute::make_tensor<bool>(cute::shape(src));
                     
@@ -697,7 +698,17 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
                     cute::MMA_Atom<cute::SM80_16x8x16_F32BF16BF16F32_TN>{}, // 固定 MMA_Q_CHUNK_SIZE = Q_CHUNK_SIZE所以shape(0) = 1
                     cute::Layout<cute::Shape<cute::_1, cute::Int<KV_CHUNK_SIZE/MMA_N>, cute::_1>>{}  // M N K K方向循环，N方向warp处理，M固定单warp
                 );
+                auto smem_tiled_copy_Q = cute::make_tiled_copy_A(
+                    cute::Copy_Atom<cute::SM75_U32x4_LDSM_N, scalar_t>{}, mma
+                );
+
+                auto smem_tiled_copy_K = cute::make_tiled_copy_B(
+                    cute::Copy_Atom<cute::SM75_U32x2_LDSM_N, scalar_t>{}, mma
+                );
                 auto thr_mma = mma.get_thread_slice(threadIdx.x);
+                auto smem_thr_copy_Q = smem_tiled_copy_Q.get_thread_slice(threadIdx.x);
+                auto smem_thr_copy_K = smem_tiled_copy_K.get_thread_slice(threadIdx.x);
+
                 auto tCsAcc = thr_mma.partition_C(sTensor_score);
                 auto tCrAcc = cute::make_fragment_like(tCsAcc);
                 cute::clear(tCrAcc);
@@ -710,12 +721,16 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
                         cute::make_shape(cute::Int<KV_CHUNK_SIZE>{}, cute::Int<MMA_K>{}),
                         cute::make_coord(cute::_0{}, i)
                     );
-                    auto tCsQ = thr_mma.partition_A(q_chunk);
-                    auto tCsK = thr_mma.partition_B(k_chunk);
-                    auto tCrQ = cute::make_fragment_like(tCsQ);
-                    auto tCrK = cute::make_fragment_like(tCsK);
-                    cute::copy(tCsQ, tCrQ);
-                    cute::copy(tCsK, tCrK);
+                    auto tCrQ = thr_mma.partition_fragment_A(q_chunk);
+                    auto tCrK = thr_mma.partition_fragment_B(k_chunk);
+
+                    auto tXsQ = smem_thr_copy_Q.partition_S(q_chunk);
+                    auto tXrQ = smem_thr_copy_Q.retile_D(tCrQ);
+
+                    auto tXsK = smem_thr_copy_K.partition_S(k_chunk);
+                    auto tXrK = smem_thr_copy_K.retile_D(tCrK);
+                    cute::copy(smem_tiled_copy_Q, tXsQ, tXrQ);
+                    cute::copy(smem_tiled_copy_K, tXsK, tXrK);
                     cute::gemm(thr_mma, tCrQ, tCrK, tCrAcc);
                 }
                 cute::copy(tCrAcc, tCsAcc);
@@ -837,7 +852,6 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
 #endif
 
                 constexpr auto subgroup = KV_CHUNK_SIZE / WARP_SIZE;
-                constexpr auto subgroup_num = WARP_SIZE / subgroup;
                 uint32_t base_mask = 0xffffffff;
                 toy_flash_attn_assert((subgroup & (subgroup-1)) == 0);  // 2的幂，便于warp内分组
                 if constexpr (subgroup == 1) {

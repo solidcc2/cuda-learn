@@ -15,6 +15,10 @@
     - `*reinterpret_cast<uint4*>(&sTensor_q(q_off, col)) = *reinterpret_cast<const uint4*>(&sTensor_q_raw(q_off, col))`
     - `cute::copy(tCsQ, tCrQ)`
 
+2. 通过将ncu-ui看到sass并没有自动是ldsm的ldmatrix指令, 通过增加明确的copyatomic, k改为swizzle<3,3>, 实现ldsm指令接入, q & k的bank conflict全部清除, 进一步下降到55.9w
+
+TODO: 暂时没对k载入做u128载入,还是按照u16载入, 那里目前没有bank conflict, 等主瓶颈消除后处理. 
+
 ### 20260522
 
 | version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
