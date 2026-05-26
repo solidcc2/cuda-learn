@@ -325,13 +325,9 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
             for(int i=0; i<cute::size(pred); i++){
                 pred(i) = cute::elem_less(src_id(i), cute::shape(gTensor_K));
             }
-            cute::fill(dst, scalar_t{0});
-            // cute::copy_if(pred, src, dst);
             cute::copy(copy_a, src, dst);
             src = thr_copy.partition_S(gTensor_V_block);
             dst = thr_copy.partition_D(sTensor_v_cache);
-            cute::fill(dst, scalar_t{0});
-            // cute::copy_if(pred, src, dst);
             cute::copy(copy_a, src, dst);
             cute::cp_async_fence();
         }
@@ -544,28 +540,8 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
     for(int64_t kv_chunk_id = kv_chunk_end - 1;
             kv_chunk_id >= kv_chunk_begin; kv_chunk_id--) {
 
-        // for kv chunk do 
-        //     k tile load
-        //     chunk softmax
-        //     v tile load
-        //     out chunk merge
-
         // k tile载入不能直接做，依赖物理地址 & 虚拟地址转换
         {   // kv_seq_id 作用域 for k tile load
-            // 构建block table chunk 缓存
-            // auto virt_seq_begin = kv_chunk_id * KV_CHUNK_SIZE;
-            // auto virt_seq_end = min((kv_chunk_id+1)*KV_CHUNK_SIZE, param.kv_seqlen());
-            // auto virt_block_begin = virt_seq_begin / BLOCK_SIZE;    // TODO: block_size需要模板化
-            // auto virt_block_end = (virt_seq_end + BLOCK_SIZE - 1) / BLOCK_SIZE;
-            // for(int linear = threadIdx.x; virt_block_begin + linear < virt_block_end; linear += blockDim.x) {
-            //     layout.cache_block_table[linear] = param.block_table[
-            //         param.bt_stride[0] * param.batch_id() +
-            //         param.bt_stride[1] * (virt_block_begin + linear)
-            //     ];
-            // }
-            // __syncthreads();
-            // if (cute::thread0())
-            //     cute::print("------\n");
             for(int seq_off = 0; seq_off < KV_CHUNK_SIZE; seq_off ++) {
             // for(int linear = threadIdx.x; linear < cute::size(sTensor_k); linear += blockDim.x) {
                 auto kv_seq_id = kv_chunk_id * KV_CHUNK_SIZE + seq_off;
@@ -573,13 +549,6 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
                 if (valid) {
                     auto virt_block_id = kv_seq_id / BLOCK_SIZE;
                     auto block_off = kv_seq_id % BLOCK_SIZE;
-
-                    // auto phy_block_id = 
-                    //     layout.cache_block_table[virt_block_id - virt_block_begin];
-                    // auto phy_block_id = param.block_table[
-                    //     param.bt_stride[0] * param.batch_id() +
-                    //     param.bt_stride[1] * virt_block_id
-                    // ];
                     __shared__ __align__(16) int32_t phy_block_id;
                     if (threadIdx.x == 0) {
                         phy_block_id = param.block_table[
@@ -593,33 +562,13 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
                         layout.fetch(phy_block_id, param.kv_head_id());
                         last_phy_block_id = phy_block_id;
                         __syncthreads();
-                        // if (cute::thread0()) {
-                        //     cute::print("cache block: ");
-                        //     cute::print(last_phy_block_id);
-                        //     cute::print("\n");
-                        // }
                     }
 
-                    // sTensor_k(coord) = gTensor_K(phy_block_id, block_off, param.kv_head_id(), head_off);
-                    // sTensor_v_t(head_off, seq_off) = gTensor_V(phy_block_id, block_off, param.kv_head_id(), head_off);
-                    // sTensor_k(seq_off, cute::_) = sTensor_k_cache(block_off, cute::_);
-                    
-                    // cute::copy(
-                    //     sTensor_k_cache(block_off, cute::_),
-                    //     sTensor_k(seq_off, cute::_)
-                    // );
-                    // cute::copy(
-                    //     sTensor_v_cache(block_off, cute::_),
-                    //     sTensor_v_t(cute::_, seq_off)
-                    // );
                     if (threadIdx.x < cute::size<1>(sTensor_k)) {
                         sTensor_k(seq_off, threadIdx.x) = sTensor_k_cache(block_off, threadIdx.x);
                         sTensor_v_t(threadIdx.x, seq_off) = sTensor_v_cache(block_off, threadIdx.x);
                     }
-                    // sTensor_v_t(cute::_, seq_off) = sTensor_v_cache(block_off, cut::_);
                 } else {
-                    // sTensor_k(seq_off, cute::_) = scalar_t{0};// v也一起提前载入，减少一次寻址, v转置载入，方便后面 P @ V
-                    // sTensor_v_t(cute::_, seq_off) = scalar_t{0}; 
                     if (threadIdx.x < cute::size<1>(sTensor_k)) {
                         sTensor_k(seq_off, threadIdx.x) = scalar_t{0};
                         sTensor_v_t(threadIdx.x, seq_off) = scalar_t{0}; 
@@ -672,9 +621,7 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
                         auto coord = src_id(i);
                         pred(i) = cute::elem_less(src_id(i), cute::shape(gTensor_Q_batch));
                     }
-                    // cute::fill(dst, scalar_t{0});
                     cute::copy_if(copy_a, pred, src, dst);
-                    // cute::copy(copy_a, src, dst);
                     cute::cp_async_fence();
                 }
                 cute::cp_async_wait<0>();   // Q就绪
