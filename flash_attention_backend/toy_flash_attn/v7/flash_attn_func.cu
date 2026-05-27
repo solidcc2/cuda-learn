@@ -460,7 +460,7 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
     auto sTensor_v_t = cute::make_tensor(
         cute::make_smem_ptr(layout.v),
         cute::composition(
-            cute::Swizzle<5, 1>{},
+            cute::Swizzle<3, 3>{},
             cute::make_layout(
                 cute::make_shape(cute::Int<HEAD_DIM_STRIDE>{}, cute::Int<KV_CHUNK_SIZE>{}),
                 cute::make_stride(cute::Int<KV_CHUNK_SIZE>{}, cute::Int<1>{})
@@ -480,7 +480,7 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
     auto sTensor_score = cute::make_tensor(
         cute::make_smem_ptr(layout.score_reduction),
         cute::composition(
-            cute::Swizzle<5, 0>{},
+            cute::Swizzle<4,1>{},
             cute::make_layout(
                 cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
                 cute::LayoutRight{}
@@ -499,13 +499,18 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
     );
     auto sTensor_softmax = cute::make_tensor(
         cute::make_smem_ptr(layout.softmax_reduction),
-        cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
-        cute::LayoutRight{}
+        cute::composition(
+            cute::Swizzle<3, 3>{},
+            cute::make_layout(
+                cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
+                cute::LayoutRight{}
+            )
+        )
     );
     auto sTensor_out_reduction = cute::make_tensor(
         cute::make_smem_ptr(layout.out_reduction),
         cute::composition(
-            cute::Swizzle<5, 0>{},
+            cute::Swizzle<3, 2>{},
             cute::make_layout(
                 cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
                 cute::LayoutRight{}
@@ -652,6 +657,7 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
                 auto smem_tiled_copy_K = cute::make_tiled_copy_B(
                     cute::Copy_Atom<cute::SM75_U32x2_LDSM_N, scalar_t>{}, mma
                 );
+
                 auto thr_mma = mma.get_thread_slice(threadIdx.x);
                 auto smem_thr_copy_Q = smem_tiled_copy_Q.get_thread_slice(threadIdx.x);
                 auto smem_thr_copy_K = smem_tiled_copy_K.get_thread_slice(threadIdx.x);
@@ -682,7 +688,7 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
                 }
                 cute::copy(tCrAcc, tCsAcc);
                 __syncthreads();
-                // 结合窗口，过滤掉无效部分
+                
                 for(int linear = threadIdx.x; linear < cute::size(sTensor_score); linear += THR_NUM) {
                     auto coord = cute::idx2crd(linear, cute::shape(sTensor_score));
                     auto [q_off, kv_off] = coord;
@@ -933,7 +939,16 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
                     cute::MMA_Atom<cute::SM80_16x8x16_F32BF16BF16F32_TN>{},
                     cute::Layout<cute::Shape<cute::_1, cute::Int<WARP_NUM>, cute::_1>>{}
                 );
+                auto smem_tiled_copy_softmax = cute::make_tiled_copy_A(
+                    cute::Copy_Atom<cute::SM75_U32x4_LDSM_N, scalar_t>{}, mma
+                );
+                auto smem_tiled_copy_VT = cute::make_tiled_copy_B(
+                    cute::Copy_Atom<cute::SM75_U32x2_LDSM_N, scalar_t>{}, mma
+                );
+
                 auto thr_mma = mma.get_thread_slice(threadIdx.x);
+                auto smem_thr_copy_softmax = smem_tiled_copy_softmax.get_thread_slice(threadIdx.x);
+                auto smem_thr_copy_VT = smem_tiled_copy_VT.get_thread_slice(threadIdx.x);
 
                 for (int n_tile_id = 0; n_tile_id < HEAD_DIM_STRIDE / N_PER_PASS; ++n_tile_id) {
                     auto out_chunk = cute::local_tile(
@@ -957,39 +972,52 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
                             cute::make_shape(cute::Int<N_PER_PASS>{}, cute::Int<MMA_K>{}),
                             cute::make_coord(n_tile_id, mma_kv_chunk_id)
                         );
+                        auto tCr_softmax = thr_mma.partition_fragment_A(softmax_chunk);
+                        auto tCr_V_T = thr_mma.partition_fragment_B(v_chunk);
 
-                        auto tCs_softmax = thr_mma.partition_A(softmax_chunk);
-                        auto tCs_V_T = thr_mma.partition_B(v_chunk);
-                        auto tCr_softmax = cute::make_fragment_like(tCs_softmax);
-                        auto tCr_V_T = cute::make_fragment_like(tCs_V_T);
+                        auto tXr_softamx = smem_thr_copy_softmax.retile_D(tCr_softmax);
+                        auto tXr_V_T = smem_thr_copy_VT.retile_D(tCr_V_T);
 
-                        cute::copy(tCs_softmax, tCr_softmax);
-                        cute::copy(tCs_V_T, tCr_V_T);
+                        auto tXs_softmax = smem_thr_copy_softmax.partition_S(softmax_chunk);
+                        auto tXs_V_T = smem_thr_copy_VT.partition_S(v_chunk);
+
+                        cute::copy(smem_tiled_copy_softmax, tXs_softmax, tXr_softamx);
+                        cute::copy(smem_tiled_copy_VT, tXs_V_T, tXr_V_T);
+
                         cute::gemm(thr_mma, tCr_softmax, tCr_V_T, tCr_out);
                     }
-
+                    
                     cute::copy(tCr_out, tCs_out);
                 }
                 __syncthreads();
             }
 
             {   // out reduction
-                for(int linear = threadIdx.x; linear < cute::size(sTensor_out_reduction); linear += THR_NUM) {
-                    auto coord = cute::idx2crd(linear, cute::shape(sTensor_out_reduction));
-                    auto [q_off, head_off] = coord;
+                constexpr auto loop_n = cute::size(sTensor_out_reduction);
+                CUTE_UNROLL
+                for(int linear = threadIdx.x * 4; linear < loop_n; linear += THR_NUM * 4) {
+                    // auto coord = cute::idx2crd(linear, cute::shape(sTensor_out_reduction));
+                    // auto [q_off, head_off] = coord;
+                    auto q_off = linear / HEAD_DIM_STRIDE;
+                    auto head_off = linear % HEAD_DIM_STRIDE;
+                    auto vec = *reinterpret_cast<const float4*>(&sTensor_out_reduction(q_off, head_off));
+                    inner_scalar_t o_vec[4] = {vec.x, vec.y, vec.z, vec.w};
+
                     auto max_new = sTensor_warp_max(q_off, 0);
                     auto sum_new = sTensor_warp_sum(q_off, 0);
                     auto max_old = local_last_max(q_off);
                     auto sum_old = local_last_sum(q_off);
                     auto max_merge = max(max_old, max_new);
 
-                    auto o_old = local_out(coord);
-                    auto o_new = sTensor_out_reduction(coord);
-                    auto o_merge = check_non_finite_val(
-                                o_old * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_old, max_merge), "out_chunk_reduction_old_sub")) +
-                                o_new * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_new, max_merge), "out_chunk_reduction_new_sub"))  
-                            , "out_chunk_reduction");       // 去除sum除法，统一到最后
-                    local_out(coord) = o_merge;
+                    CUTE_UNROLL
+                    for(int vec_off=0; vec_off < 4; vec_off++) {
+                        auto o_old = local_out(q_off, head_off + vec_off);
+                        auto o_merge = check_non_finite_val(
+                                    o_old * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_old, max_merge), "out_chunk_reduction_old_sub")) +
+                                    o_vec[vec_off] * exp2f(check_nan_val(softmax_scale_log2 * softmax_sub(max_new, max_merge), "out_chunk_reduction_new_sub"))  
+                                , "out_chunk_reduction");       // 去除sum除法，统一到最后
+                        local_out(q_off, head_off + vec_off) = o_merge;
+                    }
                     toy_flash_attn_assert(THR_NUM >= HEAD_DIM_STRIDE);
                 }
                 __syncthreads();
