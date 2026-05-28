@@ -30,6 +30,7 @@ struct FlashAttnTrait {
     static constexpr int32_t WARP_SIZE = 32;
     static constexpr int32_t THR_NUM = 128;   // 暂定，后续调整到模板去
     static constexpr int32_t BLOCK_SIZE = 16;   // 暂定，后续调整到模板参数
+    static constexpr int32_t SCORE_STRIDE = KV_CHUNK_SIZE + 6;  // pad 6个fp32, 8B对齐, 便于使用STS.64
     
     // Q @ K^T 的MMA约束
     static_assert(Q_CHUNK_SIZE % MMA_M == 0);
@@ -479,13 +480,14 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
     );
     auto sTensor_score = cute::make_tensor(
         cute::make_smem_ptr(layout.score_reduction),
-        cute::composition(
-            cute::Swizzle<4,1>{},
-            cute::make_layout(
+        // cute::composition(
+        //     cute::Swizzle<2,1>{},
+        //     cute::make_layout(
                 cute::make_shape(cute::Int<Q_CHUNK_SIZE>{}, cute::Int<KV_CHUNK_SIZE>{}),
-                cute::LayoutRight{}
-            )
-        )
+                cute::make_stride(cute::Int<SCORE_STRIDE>{}, cute::_1{})
+                // cute::LayoutRight{}
+        //     )
+        // )
     );
     auto sTensor_warp_max = cute::make_tensor(
         cute::make_smem_ptr(layout.warp_max),

@@ -13,6 +13,12 @@
 ### 20260527
 1. 通过给各个环节增加swizzle, 访存合并, 使用LDSM指令, 将bank conflict进一步降低到9w. 单kernel时延到达4800us. 现在主要bank conflict落到score矩阵, 调整swizzle参数不能进一步消除qk矩阵乘法结果写回时的bank conflict, sass层面已经是访存较为友好的STS.64指令了.分析下来是因为该矩阵较小, swizzle的扰动源来自于高位, 而对于小矩阵高位都是0, 后面考虑通过padding来解决.
 
+2. 尝试+2, +4, +6 padding score, 似乎都不能彻底消除score的bank conflict, 但是发现+6时, 总体bank conflict下降到63152, 同时, 看ncu-ui里, bank conflict的热点已经落到sTensor_v_t的读取了, 这里涉及smem转置. 同时, 现阶段的bank conflict优化收益已经开始递减, 时延已经从最初的5995, 来到现在的4786, 端到端2048 qwen从30 tok/s达到41 tok/s. 主瓶颈现在已经在stall wait了.
+
+| version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v7 | `void kernel_wrapper<c10::BFloat16, float, 16, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5>::ParamSet)` | 4786.816 | 0.28 | 52.38 | 8.34 | 0.17 | 63152.0 | 3584.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, shared_bank_conflict_risk |
+
 ### 20260526
 1. 增加swizzle, 并将bf16类型的swizzle从swizzle<5,1>改为swizzle<3,3>, 将bank conflict从最初280w降低到67.8w(q增加了permute和swizzle<3,3>, 其他依旧是swizzle<5,1>), 这里最初使用5,1的想法是, bf16 需要2个元素才占据1个4B bank, 32个bank,需要5个4B打乱,因此mbase设置为1,保持2个bf16连续,最低2个bf16打乱无意义, 让32个bank打乱. 但是这样会导致mma矩阵乘法时, 每线程读8元素,16B时必须分4次32bit读,而不能合并访存为单次128bit, 所以改回swizzle<3,3>, 并且因为gmem的u128 async载入,必须地址连续, 因此增加了一个buffer用于q载入, 然后依照swizzle<3, 3>底层128b连续做permute. 通过ncu-ui看, 可以看到q读取的bank conflict彻底清0, 包括语句都没有发生bank conflict
     - `*reinterpret_cast<uint4*>(&sTensor_q(q_off, col)) = *reinterpret_cast<const uint4*>(&sTensor_q_raw(q_off, col))`
