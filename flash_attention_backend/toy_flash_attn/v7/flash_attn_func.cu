@@ -385,6 +385,7 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
         param.causal ? 0 : 
             param.window_size[1] == -1 ? param.kv_seqlen() : param.window_size[1]
     };
+    toy_flash_attn_assert(param.q_seqlen() == 1);
 
     const int64_t q_kv_offset = param.q_seqlen() - param.kv_seqlen();
     const int64_t q_chunk_first = param.q_chunk_id() * Q_CHUNK_SIZE;
