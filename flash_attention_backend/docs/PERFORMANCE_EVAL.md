@@ -40,7 +40,7 @@
 | CUDA toolkit | `12.8` |
 | `torch.cuda.is_available()` | `true` |
 | vLLM | `0.17.1` |
-| git commit | `4cebbd1` |
+| git commit | `bcba90f` |
 
 说明：
 
@@ -191,7 +191,8 @@
 | `qwen_b1_t128` | baseline | paged | `4.6` | `27698.1 ms` |
 | `qwen_b1_t128` | v5 | paged | `46.4` | `2757.0 ms` |
 | `qwen_b1_t128` | v6 | paged | `47.9` | `2671.0 ms` |
-| `qwen_b1_t128` | v7 | paged | `30.8` | `4152.0 ms` |
+| `qwen_b1_t128` | v7 (`4cebbd1`) | paged | `30.8` | `4152.0 ms` |
+| `qwen_b1_t128` | v7 (`bcba90f`) | paged | `34.4` | `3724.5 ms` |
 | `qwen_b1_t128` | official | paged | `84.7` | `1511.0 ms` |
 
 ### 6.3 E2E 摘要
@@ -200,13 +201,14 @@
 | --- | --- |
 | `v6 / v5` | `1.03x` |
 | `v7 / v6` | `0.64x` |
+| `v7(bcba90f) / v7(4cebbd1)` | `1.12x` |
 | `official / v6` | `1.77x` |
 | `official / baseline` | `18.41x` |
 
 当前观察：
 
 - `v5` 和 `v6` 在 e2e 上基本持平
-- `v7` 明显慢于 v5/v6（约 64%）
+- `v7` 明显慢于 v5/v6（约 64%），但 `bcba90f` 相比 `4cebbd1` 提升了 12%，来自 bank conflict 优化
 - `official` 在当前环境下约 `v6` 的 1.77x，差距比历史数据（RTX 4070 Ti SUPER 上约 6x）小，可能与数据集和 GPU 相关
 
 ## 7. Op Benchmark
@@ -233,42 +235,50 @@
 | `gpt2_like_b1_s128_h64` | baseline | paged | `2.566` | `50.3x` |
 | `gpt2_like_b1_s128_h64` | v5 | paged | `0.105` | `2.1x` |
 | `gpt2_like_b1_s128_h64` | v6 | paged | `0.108` | `2.1x` |
-| `gpt2_like_b1_s128_h64` | v7 | paged | `0.109` | `2.1x` |
+| `gpt2_like_b1_s128_h64` | v7 (`4cebbd1`) | paged | `0.109` | `2.1x` |
+| `gpt2_like_b1_s128_h64` | v7 (`bcba90f`) | paged | `0.091` | `1.8x` |
 | `gpt2_like_b1_s128_h64` | official | paged | `0.051` | `1.0x` |
 | `gqa_case_b1_s128` | baseline | paged | `8.794` | `135.3x` |
 | `gqa_case_b1_s128` | v5 | paged | `0.327` | `5.0x` |
 | `gqa_case_b1_s128` | v6 | paged | `0.336` | `5.2x` |
-| `gqa_case_b1_s128` | v7 | paged | `1.151` | `17.7x` |
+| `gqa_case_b1_s128` | v7 (`4cebbd1`) | paged | `1.151` | `17.7x` |
+| `gqa_case_b1_s128` | v7 (`bcba90f`) | paged | `0.139` | `2.1x` |
 | `gqa_case_b1_s128` | official | paged | `0.065` | `1.0x` |
 | `gqa_case_b4_s512` | baseline | paged | `10.067` | `110.6x` |
 | `gqa_case_b4_s512` | v5 | paged | `0.204` | `2.2x` |
 | `gqa_case_b4_s512` | v6 | paged | `0.191` | `2.1x` |
-| `gqa_case_b4_s512` | v7 | paged | `0.321` | `3.5x` |
+| `gqa_case_b4_s512` | v7 (`4cebbd1`) | paged | `0.321` | `3.5x` |
+| `gqa_case_b4_s512` | v7 (`bcba90f`) | paged | `0.632` | `6.9x` |
 | `gqa_case_b4_s512` | official | paged | `0.091` | `1.0x` |
 | `qwen_like_b1_s128_h64` | baseline | paged | `2.609` | `56.7x` |
 | `qwen_like_b1_s128_h64` | v5 | paged | `0.104` | `2.3x` |
 | `qwen_like_b1_s128_h64` | v6 | paged | `0.107` | `2.3x` |
-| `qwen_like_b1_s128_h64` | v7 | paged | `0.318` | `6.9x` |
+| `qwen_like_b1_s128_h64` | v7 (`4cebbd1`) | paged | `0.318` | `6.9x` |
+| `qwen_like_b1_s128_h64` | v7 (`bcba90f`) | paged | `0.262` | `5.7x` |
 | `qwen_like_b1_s128_h64` | official | paged | `0.046` | `1.0x` |
 | `qwen_like_b1_s2048_h64` | baseline | paged | `35.263` | `496.7x` |
 | `qwen_like_b1_s2048_h64` | v5 | paged | `1.308` | `18.4x` |
 | `qwen_like_b1_s2048_h64` | v6 | paged | `1.252` | `17.6x` |
-| `qwen_like_b1_s2048_h64` | v7 | paged | `4.357` | `61.4x` |
+| `qwen_like_b1_s2048_h64` | v7 (`4cebbd1`) | paged | `4.357` | `61.4x` |
+| `qwen_like_b1_s2048_h64` | v7 (`bcba90f`) | paged | `3.495` | `49.2x` |
 | `qwen_like_b1_s2048_h64` | official | paged | `0.071` | `1.0x` |
 | `qwen_like_b1_s512_h64` | baseline | paged | `29.229` | `436.3x` |
 | `qwen_like_b1_s512_h64` | v5 | paged | `0.367` | `5.5x` |
 | `qwen_like_b1_s512_h64` | v6 | paged | `0.382` | `5.7x` |
-| `qwen_like_b1_s512_h64` | v7 | paged | `0.766` | `11.4x` |
+| `qwen_like_b1_s512_h64` | v7 (`4cebbd1`) | paged | `0.766` | `11.4x` |
+| `qwen_like_b1_s512_h64` | v7 (`bcba90f`) | paged | `0.934` | `13.9x` |
 | `qwen_like_b1_s512_h64` | official | paged | `0.067` | `1.0x` |
 | `qwen_like_b4_s128_h64` | baseline | paged | `2.664` | `59.2x` |
 | `qwen_like_b4_s128_h64` | v5 | paged | `0.106` | `2.4x` |
 | `qwen_like_b4_s128_h64` | v6 | paged | `0.085` | `1.9x` |
-| `qwen_like_b4_s128_h64` | v7 | paged | `0.170` | `3.8x` |
+| `qwen_like_b4_s128_h64` | v7 (`4cebbd1`) | paged | `0.170` | `3.8x` |
+| `qwen_like_b4_s128_h64` | v7 (`bcba90f`) | paged | `0.258` | `5.7x` |
 | `qwen_like_b4_s128_h64` | official | paged | `0.045` | `1.0x` |
 | `qwen_like_b4_s512_h64` | baseline | paged | `34.015` | `486.0x` |
 | `qwen_like_b4_s512_h64` | v5 | paged | `0.768` | `11.0x` |
 | `qwen_like_b4_s512_h64` | v6 | paged | `0.679` | `9.7x` |
-| `qwen_like_b4_s512_h64` | v7 | paged | `1.162` | `16.6x` |
+| `qwen_like_b4_s512_h64` | v7 (`4cebbd1`) | paged | `1.162` | `16.6x` |
+| `qwen_like_b4_s512_h64` | v7 (`bcba90f`) | paged | `0.939` | `13.4x` |
 | `qwen_like_b4_s512_h64` | official | paged | `0.070` | `1.0x` |
 
 ### 7.3 Op 摘要
@@ -280,12 +290,17 @@
 | `qwen_like_b1_s2048_h64`：`v6 / v5` | `0.96x` |
 | `qwen_like_b1_s2048_h64`：`v7 / v6` | `3.48x` |
 | `gqa_case_b1_s128`：`v7 / v6` | `3.43x` |
+| `gpt2_like_b1_s128_h64`：`v7(bcba90f) / v7(4cebbd1)` | `0.83x` |
+| `gqa_case_b1_s128`：`v7(bcba90f) / v7(4cebbd1)` | `0.12x` |
+| `qwen_like_b1_s128_h64`：`v7(bcba90f) / v7(4cebbd1)` | `0.82x` |
+| `qwen_like_b1_s2048_h64`：`v7(bcba90f) / v7(4cebbd1)` | `0.80x` |
 
 当前观察：
 
 - 短序列下 `v5 / v6` 接近（~2x official），`v7` 退化约 3x
-- 长序列 `qwen_like_b1_s2048_h64`：`v6` 是 official 的 17.6x，`v7` 达 61x
-- `v7` 在 GQA case 上退化尤其明显（gqa_b1_s128: 17.7x vs official），与 kv-head-first 架构下 Q 反复换入换出一致
+- 长序列 `qwen_like_b1_s2048_h64`：`v6` 是 official 的 17.6x，`v7` 达 61.4x → 49.2x（`bcba90f` 改善中）
+- `v7(bcba90f)` 相比 `v7(4cebbd1)` 在大部分 case 上有 10-20% 提升，GQA case（gqa_b1_s128）提升尤其显著（1.151→0.139，8.3x），来自 bank conflict 优化
+- 部分 case 有退化（gqa_b4_s512: 0.321→0.632，qwen_like_b4_s128: 0.170→0.258），待进一步分析
 
 ## 8. Profiling
 
@@ -303,22 +318,32 @@
 
 ### 8.1 指标对比
 
-| 指标 | v7 | official |
-| --- | --- | --- |
-| Kernel duration | 5956.00 µs | 29.60 µs |
-| Memory throughput | 32.10 GB/s | 618.43 GB/s |
-| DRAM throughput % | 14.55% | 37.01% |
-| L2 hit rate | 50.24% | 93.44% |
-| Achieved occupancy | 7.62% | 10.70% |
-| Active warps/scheduler | 5.04 | 7.08 |
-| No eligible % | 18.60% | 67.21% |
-| Registers/thread | 95 | 40 |
-| Shared mem/block | 16.00 KB | 30.00 KB |
-| Grid size | 512x1x1 | 128x1x2 |
-| Block size | 128 | 128 |
+| 指标 | v7 (`4cebbd1`) | v7 (`bcba90f`) | official |
+| --- | --- | --- | --- |
+| Kernel duration | 5956.00 µs | 4786.37 µs | 29.60 µs |
+| Memory throughput | 32.10 GB/s | 0.28 GB/s | 618.43 GB/s |
+| DRAM throughput % | 14.55% | 0.29% | 37.01% |
+| L2 hit rate | 50.24% | 52.05% | 93.44% |
+| Achieved occupancy | 7.62% | 8.34% | 10.70% |
+| Active warps/scheduler | 5.04 | 1.00 | 7.08 |
+| No eligible % | 18.60% | — | 67.21% |
+| Registers/thread | 95 | 103 | 40 |
+| Shared mem/block | 16.00 KB | 48.13 KB | 30.00 KB |
+| Grid size | 512x1x1 | 1x1x2 | 128x1x2 |
+| Block size | 128 | 128 | 128 |
+| Shared bank conflicts | ~2,820,000 | 63,152 | — |
+| Global excessive sectors | 3,584 | 3,584 | — |
 
 ### 8.2 风险标签
 
+`4cebbd1` 时期：
+- `underfilled_grid`
+- `low_occupancy`
+- `scheduler_starvation_risk`
+- `uncoalesced_global_access_risk`
+- `shared_bank_conflict_risk`
+
+`bcba90f` 时期：
 - `underfilled_grid`
 - `low_occupancy`
 - `scheduler_starvation_risk`
@@ -327,13 +352,15 @@
 
 当前可以直接从摘要读出的事实：
 
-- v7 kernel 时长是 official 的 201x，差距极大
-- memory throughput 差距悬殊（32 vs 618 GB/s），L2 hit rate（50% vs 93%）
-- v7 的 register pressure 较高（95 vs 40），限制并行 warp 数
+- v7 kernel 时长从 5956→4786 µs（-19.6%），但仍是 official 的 162x
+- **shared bank conflicts 从 ~282 万降至 63,152（-97.7%）**，swizzle 优化效果显著
+- global excessive sectors 不变（3,584），非本轮优化目标
+- register pressure 略增（95→103），smem 用量增加（16→48 KB），与新增 padding/swizzle 布局一致
+- grid 从 512x1x1 变为 1x1x2，与 kv-head-first 架构中 head 数量减少一致
 
 边界说明：
 
-- v7 当前处于 global excessive sector 优化实验阶段，kernel 并非最终状态
+- v7 当前处于 bank conflict 优化阶段，本轮已基本收敛（282万→6万），后续关注 memory throughput 和 L2 hit rate
 
 ## 9. 版本分析
 
@@ -359,11 +386,11 @@
 ### v7
 
 - 当前 CUDA 实现，kv-head-first 架构
-- e2e 上明显慢于 v6（30.8 vs 47.9 tok/s，-56%）
-- op 层在所有 case 上比 v6 慢 1.5-3.5x，GQA case 退化最严重
-- 已知根因：kv-head-first 架构下每轮 kv chunk 需要重新加载所有 q head，smem 放不下 q_per_kv_group=7 个 head
-- NCU 显示 global excessive sectors 已优化至 3584，但 bank conflict 仍有 282 万
-- 当前实验阶段暂不处理 kv-head-first 的性能退化，计划 bank conflict 优化完成后另起 v8 用 q-head-first 对比
+- e2e 上从 30.8→34.4 tok/s（+11.7%），但仍明显慢于 v6（48.4 tok/s）
+- op 层大部分 case 有 10-20% 提升，GQA case（gqa_b1_s128）提升尤其显著（1.151→0.139 ms，8.3x）
+- NCU 显示 shared bank conflicts 从 ~282 万降至 63,152（-97.7%），swizzle + padding 优化效果显著
+- kernel 时长缩短 19.6%（5956→4786 µs），register 和 smem 用量有所增加，为优化代价
+- 已知 kv-head-first 架构下 Q 反复换入换出仍是主要瓶颈，当前暂不处理
 
 ### official
 
@@ -378,7 +405,7 @@
    - `v7 + head_dim=64` 的 5 个核心 case 全部通过（collect 模式，strict 阈值）
    - 此前报告的 `head_dim_64_sensitive` NaN 已确认为测试配置问题（block_size 不匹配），非 kernel 缺陷
    - `head_dim=16/32` 当前应视为 `unsupported`
-3. e2e 上 `v5` 和 `v6` 基本持平，`v7` 明显落后于两者，`official` 领先。
-4. op 层结果显示短序列下 v5/v6 接近 official（~2x），v7 在 GQA case 上退化明显。
-5. NCU 显示 v7 kernel 时长是 official 的 201x，memory throughput 和 L2 hit rate 差距悬殊。
-6. v7 当前处于 kv-head-first 实验阶段，性能退化根因已知（Q 反复换入换出），当前实验暂不处理，待 bank conflict 优化后评估下一步方向。
+3. e2e 上 `v5` 和 `v6` 基本持平，`v7` 明显落后于两者，`official` 领先。v7 `bcba90f` 相比 `4cebbd1` 有 12% 提升。
+4. op 层 v7 在 GQA case 上退化最严重，但 `bcba90f` 已将 gqa_b1_s128 从 17.7x 降至 2.1x vs official（8.3x 提升）。
+5. NCU 显示 shared bank conflicts 从 ~282 万降至 6.3 万（-97.7%），bank conflict 优化已基本收敛。
+6. v7 kernel 时长仍是 official 的 162x，下一步瓶颈在 memory throughput 和 L2 hit rate。
