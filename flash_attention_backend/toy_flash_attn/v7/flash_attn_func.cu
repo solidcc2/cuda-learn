@@ -31,6 +31,8 @@ struct FlashAttnTrait {
     static constexpr int32_t THR_NUM = 128;   // 暂定，后续调整到模板去
     static constexpr int32_t BLOCK_SIZE = 16;   // 暂定，后续调整到模板参数
     static constexpr int32_t SCORE_STRIDE = KV_CHUNK_SIZE + 6;  // pad 6个fp32, 8B对齐, 便于使用STS.64
+    static constexpr int32_t Q_HEAD_PER_GROUP = 7;
+    static_assert(Q_HEAD_PER_GROUP <Q_CHUNK_SIZE);
     
     // Q @ K^T 的MMA约束
     static_assert(Q_CHUNK_SIZE % MMA_M == 0);
@@ -259,33 +261,17 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
         return kv_seq_id >= win[0] && kv_seq_id <= win[1];
     }
 
-    __device__ inline void fetch(int32_t phy_block_id, int32_t head_id) {
+    // __device__ inline void fetch_q_head_group(int32_t k_head_id) {
+
+    // }
+
+    __device__ inline void fetch(int32_t phy_block_id, int32_t head_id, auto&& gTensor_K, auto&& gTensor_V, auto&& sTensor_k_cache, auto&& sTensor_v_cache) {
         // 考虑将tensor定义放到结构体中去，避免多次定义view
         toy_flash_attn_assert(param.k_size[3] == HEAD_DIM_STRIDE);
         toy_flash_attn_assert(param.k_stride[3] == 1);
         toy_flash_attn_assert(param.v_size[3] == HEAD_DIM_STRIDE);
         toy_flash_attn_assert(param.v_stride[3] == 1);
-        auto gTensor_K = cute::make_tensor(
-            cute::make_gmem_ptr(param.k),
-            cute::make_shape(param.k_size[0], param.k_size[1], param.k_size[2], param.k_size[3]),
-            cute::make_stride(param.k_stride[0], param.k_stride[1], param.k_stride[2], cute::_1{})
-        );
-        auto gTensor_V = cute::make_tensor(
-            cute::make_gmem_ptr(param.v),
-            cute::make_shape(param.v_size[0], param.v_size[1], param.v_size[2], param.v_size[3]),
-            cute::make_stride(param.v_stride[0], param.v_stride[1], param.v_stride[2], cute::_1{})
-        );
-        auto sTensor_k_cache = cute::make_tensor(
-            cute::make_smem_ptr(k_cache),
-            cute::make_shape(cute::Int<BLOCK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
-            cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::_1{})
-        );
 
-        auto sTensor_v_cache = cute::make_tensor(
-            cute::make_smem_ptr(v_cache),
-            cute::make_shape(cute::Int<BLOCK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
-            cute::make_stride(cute::Int<HEAD_DIM_STRIDE>{}, cute::_1{})
-        );
         auto kv_idx = cute::make_identity_tensor(cute::shape(gTensor_K));
         auto gTensor_K_block = cute::local_tile(
             gTensor_K(phy_block_id, cute::_, head_id, cute::_),
@@ -297,8 +283,7 @@ struct FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV_CHUNK_SIZE, HEA
             cute::make_shape(cute::Int<BLOCK_SIZE>{}, cute::Int<HEAD_DIM_STRIDE>{}),
             cute::make_coord(cute::_0{}, cute::_0{})
         );
-        // auto gTensor_K_block = gTensor_K(phy_block_id, cute::_, head_id, cute::_);
-        // auto gTensor_V_block = gTensor_V(phy_block_id, cute::_, head_id, cute::_);
+        
         auto kv_block_idx = kv_idx(phy_block_id, cute::_, head_id, cute::_);
 
         constexpr int32_t data_per_thr = sizeof(cute::uint128_t) / sizeof(scalar_t);
@@ -567,7 +552,7 @@ __device__ inline void FlashAttnTrait<scalar_t, inner_scalar_t, Q_CHUNK_SIZE, KV
                     __syncthreads();
                     if (last_phy_block_id != phy_block_id) {
                     // if (last_phy_block_id == -1) {
-                        layout.fetch(phy_block_id, param.kv_head_id());
+                        layout.fetch(phy_block_id, param.kv_head_id(), gTensor_K, gTensor_V, sTensor_k_cache, sTensor_v_cache);
                         last_phy_block_id = phy_block_id;
                         __syncthreads();
                     }
