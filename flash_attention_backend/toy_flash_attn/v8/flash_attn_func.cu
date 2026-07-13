@@ -15,9 +15,10 @@
     scalar_t = at::BFloat16
     inner_scalar_t = float
     THR_NUM = 128
-    constexpr int Q_BLOCK = 0;      // Q_BLOCK = q_tok * q_head
-    constexpr int KV_BLOCK = 0;
-    constexpr int HEAD_DIM = 0;
+    constexpr int Q_BLOCK = 64; 
+    constexpr int KV_SPLIT = 256;
+    constexpr int KV_BLOCK = 32;
+    constexpr int HEAD_DIM = 64;
  */
 #define TEMPLATE_PARAM template<typename scalar_t, typename inner_scalar_t, int THR_NUM, int BLOCK_SIZE, int Q_BLOCK, int KV_SPLIT, int KV_BLOCK, int HEAD_DIM>
 #define TEMPLATE_VAL scalar_t, inner_scalar_t, THR_NUM, BLOCK_SIZE, Q_BLOCK, KV_SPLIT, KV_BLOCK, HEAD_DIM
@@ -162,11 +163,19 @@ struct FlashAttnTrait<TEMPLATE_VAL>::TileLayout {
         offset += (Q_BLOCK * HEAD_DIM) * sizeof(scalar_t);
 
         offset = round_up(offset, alignof(scalar_t));
-        layout.k = reinterpret_cast<scalar_t*>(smem + offset);
+        layout.k[0] = reinterpret_cast<scalar_t*>(smem + offset);
         offset += (KV_BLOCK * HEAD_DIM) * sizeof(scalar_t);
 
         offset = round_up(offset, alignof(scalar_t));
-        layout.v = reinterpret_cast<scalar_t*>(smem + offset);
+        layout.v[0] = reinterpret_cast<scalar_t*>(smem + offset);
+        offset += (KV_BLOCK * HEAD_DIM) * sizeof(scalar_t);
+
+        offset = round_up(offset, alignof(scalar_t));
+        layout.k[1] = reinterpret_cast<scalar_t*>(smem + offset);
+        offset += (KV_BLOCK * HEAD_DIM) * sizeof(scalar_t);
+
+        offset = round_up(offset, alignof(scalar_t));
+        layout.v[1] = reinterpret_cast<scalar_t*>(smem + offset);
         offset += (KV_BLOCK * HEAD_DIM) * sizeof(scalar_t);
 
         offset = round_up(offset, alignof(scalar_t));
@@ -254,6 +263,26 @@ struct FlashAttnTrait<TEMPLATE_VAL>::TileLayout {
         }
     }
 
+    __device__ __forceinline__ void load_kv_group(int64_t kv_block_id, auto&& gK, auto& gV, auto&& sK, auto&& sV) {
+        CUTE_UNROLL
+        for(int b=0; b < KV_BLOCK/BLOCK_SIZE; b++){
+            int block_seq_begin = KV_SPLIT * param.kv_split_id() + KV_BLOCK * kv_block_id + b * BLOCK_SIZE;
+            if (block_seq_begin < param.kv_seqlen()) {
+                int phy_block_id = param.block_table[
+                    param.bt_stride[0] * param.batch_id() + 
+                    param.bt_stride[1] * block_seq_begin / BLOCK_SIZE
+                ];
+
+                load_block_smem(phy_block_id, b, gK, sK);
+                load_block_smem(phy_block_id, b, gV, sV);
+            } else {
+                clear_block_smem(b, sK);
+                clear_block_smem(b, sV);
+            }
+        }
+        cute::cp_async_fence();
+    }
+
     __device__ __forceinline__ void load_q_block_smem(int64_t q_block_id, auto&& gQ_b, auto&& sQ) {
         auto q_head = gQ_b(cute::_, param.q_head_id(), cute::_);
         auto q_block = cute::local_tile(
@@ -297,8 +326,8 @@ struct FlashAttnTrait<TEMPLATE_VAL>::TileLayout {
     }
 
     scalar_t* q;
-    scalar_t* k;
-    scalar_t* v;
+    scalar_t* k[2];
+    scalar_t* v[2];
     scalar_t* out;
 
 private:
@@ -380,37 +409,42 @@ TEMPLATE_PARAM __device__ inline void FlashAttnTrait<TEMPLATE_VAL>::splitkv_kern
             )
         )
     );
-    auto sK = cute::make_tensor(
-        cute::make_smem_ptr(layout.k),
-        cute::composition(
+    auto k_layout = cute::composition(
             cute::Swizzle<3, 3>{},
             cute::make_layout(
                 cute::make_shape(cute::Int<KV_BLOCK>{}, cute::Int<HEAD_DIM>{}),
                 cute::LayoutRight{}
             )
-        )
-    );
-
-    auto sV = cute::make_tensor(
-        cute::make_smem_ptr(layout.v), 
-        cute::composition(
+        );
+    auto v_layout = cute::composition(
             cute::Swizzle<3, 3>(),
             cute::make_layout(
                 cute::make_shape(cute::Int<KV_BLOCK>{}, cute::Int<HEAD_DIM>{}),
                 cute::LayoutRight{}
             )
-        )
-    );
-    auto sVt = cute::make_tensor(
-        sV.data(), 
-        cute::composition(
+        );
+    auto vt_layout = cute::composition(
             cute::Swizzle<3, 3>(),
             cute::make_layout(
                 cute::make_shape(cute::Int<HEAD_DIM>{}, cute::Int<KV_BLOCK>{}),
                 cute::LayoutLeft{}
             )
-        )
-    );
+        );
+    std::array _sK = {
+        cute::make_tensor(cute::make_smem_ptr(layout.k[0]), k_layout),
+        cute::make_tensor(cute::make_smem_ptr(layout.k[1]), k_layout)
+    }; 
+    std::array _sV = {
+        cute::make_tensor( cute::make_smem_ptr(layout.v[0]), v_layout),
+        cute::make_tensor( cute::make_smem_ptr(layout.v[1]), v_layout)
+    };
+    std::array _sVt = {
+        cute::make_tensor( _sV[0].data(), vt_layout),
+        cute::make_tensor( _sV[1].data(), vt_layout)
+    };
+    // auto sK = _sK[0];
+    // auto sV = _sV[0];
+    // auto sVt = _sVt[0];
 
     // 定义算子 & 线程layout
     auto mma_qk = cute::make_tiled_mma(
@@ -457,29 +491,23 @@ TEMPLATE_PARAM __device__ inline void FlashAttnTrait<TEMPLATE_VAL>::splitkv_kern
     layout.load_q_block_smem(param.q_block_id(), gQ_b, sQ);
     static_assert(KV_SPLIT % KV_BLOCK == 0);
     static_assert(KV_BLOCK % BLOCK_SIZE == 0);
-    for(int kv_block_id = 0; kv_block_id < KV_SPLIT/KV_BLOCK; kv_block_id++)
-    {   
-        // load sK & sV
-        CUTE_UNROLL
-        for(int b=0; b < KV_BLOCK/BLOCK_SIZE; b++){
-            int block_seq_begin = KV_SPLIT * param.kv_split_id() + KV_BLOCK * kv_block_id + b * BLOCK_SIZE;
-            if (block_seq_begin < param.kv_seqlen()) {
-                int phy_block_id = param.block_table[
-                    param.bt_stride[0] * param.batch_id() + 
-                    param.bt_stride[1] * block_seq_begin / BLOCK_SIZE
-                ];
 
-                layout.load_block_smem(phy_block_id, b, gK, sK);
-                layout.load_block_smem(phy_block_id, b, gV, sV);
-            } else {
-                layout.clear_block_smem(b, sK);
-                layout.clear_block_smem(b, sV);
-            }
-        }
-        
-        cute::cp_async_fence();
+    if (KV_SPLIT/KV_BLOCK > 0) {
+        layout.load_kv_group(0, gK, gV, _sK[0], _sV[0]);
         cute::cp_async_wait<0>();
         __syncthreads();
+    }
+    for(int kv_block_id = 0; kv_block_id < KV_SPLIT/KV_BLOCK; kv_block_id++)
+    {   
+        bool has_next_block = kv_block_id != KV_SPLIT/KV_BLOCK-1;
+        if (has_next_block) { // prefetch sK & sV
+            int kv_nxt_ptr = (kv_block_id + 1) % 2;
+            layout.load_kv_group(kv_block_id+1, gK, gV, _sK[kv_nxt_ptr], _sV[kv_nxt_ptr]);
+        }
+
+        auto sK = _sK[kv_block_id % 2];
+        auto sV = _sV[kv_block_id % 2];
+        auto sVt = _sVt[kv_block_id % 2];
         // Q @ K
         cute::clear(score);
         for(int64_t iK = 0; iK < HEAD_DIM / MMA_K; iK++) {
@@ -573,7 +601,10 @@ TEMPLATE_PARAM __device__ inline void FlashAttnTrait<TEMPLATE_VAL>::splitkv_kern
             old_sum(r) = alpha * old_sum(r) + beta * block_sum(r);
             old_max(r) = new_max;
         }
-        __syncthreads();
+        if (has_next_block) {
+            cute::cp_async_wait<0>();
+            __syncthreads();
+        }
     }
     if (param.num_kv_splits > 1) {
         // write split lse
