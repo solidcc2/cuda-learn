@@ -258,7 +258,7 @@ struct FlashAttnTrait<TEMPLATE_VAL>::TileLayout {
         if (threadIdx.x < cute::size(copy_a)) {
             auto src = thr_copy.partition_S(g_block_kv);
             auto dst = thr_copy.partition_D(s_block_kv);
-            cute::clear(dst);
+            // cute::clear(dst);
             cute::copy(copy_a, src, dst);
         }
     }
@@ -320,7 +320,7 @@ struct FlashAttnTrait<TEMPLATE_VAL>::TileLayout {
             for(int i=0; i<cute::size(pred); i++){
                 pred(i) = cute::elem_less(src_id(i), cute::shape(q_head));
             }
-            cute::clear(dst);
+            // cute::clear(dst);
             cute::copy_if(copy_a, pred, src, dst);
         }
     }
@@ -479,10 +479,6 @@ TEMPLATE_PARAM __device__ inline void FlashAttnTrait<TEMPLATE_VAL>::splitkv_kern
     auto acc_o_ids = thr_mma_pv.partition_C(cute::make_identity_tensor(cute::Shape<cute::Int<Q_BLOCK>, cute::Int<HEAD_DIM>>{}));
     auto acc_o_ids_rowcol = cute::make_tensor(acc_o_ids.data(),convert_layout_acc_rowcol(acc_o_ids.layout()));
 
-    cute::fill(old_max, -INFINITY);
-    cute::clear(old_sum);
-    cute::clear(acc_o);
-
     auto block_max = cute::make_tensor<float>(cute::Shape<cute::Int<cute::size<0>(score_rowcol_view)>>{});
     auto block_sum = cute::make_tensor<float>(cute::Shape<cute::Int<cute::size<0>(score_rowcol_view)>>{});
     auto block_o = cute::partition_fragment_C(thr_mma_pv, cute::Shape<cute::Int<Q_BLOCK>, cute::Int<HEAD_DIM>>{});
@@ -589,18 +585,25 @@ TEMPLATE_PARAM __device__ inline void FlashAttnTrait<TEMPLATE_VAL>::splitkv_kern
                 block_o);
         }
         // merge
-        CUTE_UNROLL
-        for (int r = 0; r < cute::size<0>(acc_o_rowcol); ++r) {
-            float new_max = max(old_max(r), block_max(r));
-            float alpha = old_sum(r) == 0.0f ? 0.0f : exp2f((old_max(r) - new_max) * softmax_scale_log2);
-            float beta = block_sum(r) == 0.0f ? 0.0f : exp2f((block_max(r) - new_max) * softmax_scale_log2);
+        if (kv_block_id == 0) {
+            cute::copy(block_sum, old_sum);
+            cute::copy(block_max, old_max);
+            cute::copy(block_o, acc_o);
+        } else {
             CUTE_UNROLL
-            for (int c = 0; c < cute::size<1>(acc_o_rowcol); ++c) {
-                acc_o_rowcol(r, c) = alpha * acc_o_rowcol(r, c) + beta  * block_o_rowcol(r, c);
+            for (int r = 0; r < cute::size<0>(acc_o_rowcol); ++r) {
+                float new_max = max(old_max(r), block_max(r));
+                float alpha = old_sum(r) == 0.0f ? 0.0f : exp2f((old_max(r) - new_max) * softmax_scale_log2);
+                float beta = block_sum(r) == 0.0f ? 0.0f : exp2f((block_max(r) - new_max) * softmax_scale_log2);
+                CUTE_UNROLL
+                for (int c = 0; c < cute::size<1>(acc_o_rowcol); ++c) {
+                    acc_o_rowcol(r, c) = alpha * acc_o_rowcol(r, c) + beta  * block_o_rowcol(r, c);
+                }
+                old_sum(r) = alpha * old_sum(r) + beta * block_sum(r);
+                old_max(r) = new_max;
             }
-            old_sum(r) = alpha * old_sum(r) + beta * block_sum(r);
-            old_max(r) = new_max;
         }
+
         if (has_next_block) {
             cute::cp_async_wait<0>();
             __syncthreads();

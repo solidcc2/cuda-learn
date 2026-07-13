@@ -59,6 +59,11 @@ Generated:  I am a software engineer with a passion for technology and a keen in
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | v8 | `void splitkv_kernel<c10::BFloat16, float, 128, 16, 64, 256, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5, T6, T7, T8>::ParamSet)` | 259.552 | 5.6 | 84.98 | 14.75 | 0.37 | 9706.0 | 0.0 | low_occupancy, scheduler_starvation_risk, local_spill_risk, shared_bank_conflict_risk |
 
+4. 增加double buffer给kv， bank conflict又一次升高到30w, 移除一部分不必要的clear和fill，取消一部分参数的初始化, 降低bank conflict到37。
+
+| version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v8 | `void splitkv_kernel<c10::BFloat16, float, 128, 16, 64, 256, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5, T6, T7, T8>::ParamSet)` | 252.576 | 7.77 | 82.5 | 14.2 | 0.38 | 37.0 | 0.0 | low_occupancy, scheduler_starvation_risk, local_spill_risk, shared_bank_conflict_risk |
 
 ### 20260607
 之前q_seqlen() == 1的断言实际没触发, 断言宏被禁用了, 实验时确认prefill阶段会污染,导致输出阶段出现"陆陆陆...". 按seqlen=1的特化方案中止.
