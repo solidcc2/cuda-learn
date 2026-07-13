@@ -543,7 +543,7 @@ TEMPLATE_PARAM __device__ inline void FlashAttnTrait<TEMPLATE_VAL>::splitkv_kern
         );
 
         cute::clear(block_o);
-        static_assert(cute::size<2>(tCrP) == KV_BLOCK / MMA_K);
+        static_assert(decltype(cute::size<2>(tCrP))::value == KV_BLOCK / MMA_K);
         for(int64_t iK = 0; iK < KV_BLOCK / MMA_K; iK++) {
             auto sVt_K = cute::local_tile(
                 sVt,
@@ -553,12 +553,15 @@ TEMPLATE_PARAM __device__ inline void FlashAttnTrait<TEMPLATE_VAL>::splitkv_kern
                 ),
                 cute::make_coord(cute::_0{}, iK)
             );
-            auto tCrA = tCrP(cute::_, cute::_, iK);
+            // auto tCrA = tCrP(cute::_, cute::_, iK);
             auto tCrB = thr_mma_pv.partition_fragment_B(sVt_K);
             auto tXsB = smem_thr_copy_Vt.partition_S(sVt_K);
             auto tXrB = smem_thr_copy_Vt.retile_D(tCrB);
             cute::copy(smem_tiled_copy_Vt, tXsB, tXrB);
-            cute::gemm(thr_mma_pv, tCrA, tCrB, block_o);
+            cute::gemm(thr_mma_pv, 
+                tCrP(cute::_, cute::_, iK), 
+                tCrB(cute::_, cute::_, cute::_0{}), 
+                block_o);
         }
         // merge
         CUTE_UNROLL

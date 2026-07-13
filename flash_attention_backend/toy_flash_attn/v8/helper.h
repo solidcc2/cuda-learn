@@ -112,7 +112,7 @@ auto convert_layout_acc_rowcol(Layout acc_layout) {
 template<typename Tensor>
 __device__ __forceinline__ 
 auto convert_fp32_to_bf16(Tensor const& x) {
-    constexpr int N = cute::size(x);
+    constexpr int N = decltype(cute::size(x))::value;
     static_assert(N % 2 == 0);
     cutlass::NumericArrayConverter<cute::bfloat16_t, float, N> convert;
     auto out = convert(*reinterpret_cast<cutlass::Array<float, N> const*>(x.data()));
@@ -125,8 +125,8 @@ auto convert_fp32_to_bf16(Tensor const& x) {
 template <class Layout>
 __device__ __forceinline__
 auto convert_layout_acc_Aregs(Layout const& acc_layout) {
-    static_assert(cute::rank(acc_layout) == cute::Int<3>{});
-    static_assert(cute::size<0>(acc_layout) == cute::Int<4>{});
+    static_assert(decltype(cute::rank(acc_layout))::value == 3);
+    static_assert(decltype(cute::size<0>(acc_layout))::value == 4);
 
     auto divided = cute::logical_divide(
         acc_layout,
@@ -146,7 +146,7 @@ auto convert_layout_acc_Aregs(Layout const& acc_layout) {
 template<class Op>
 __device__ __forceinline__
 auto reduce_thr(auto const& col_tensor, Op op) {
-    static_assert(cute::size(col_tensor) > 0);
+    static_assert(decltype(cute::size(col_tensor))::value > 0);
     auto ret = col_tensor(0);
     CUTE_UNROLL
     for (int c = 1; c < cute::size(col_tensor); ++c)
