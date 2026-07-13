@@ -1,6 +1,10 @@
 import argparse
 import os
 
+# Force offline resolution for locally cached models.
+os.environ["HF_HUB_OFFLINE"] = "1"
+os.environ["TRANSFORMERS_OFFLINE"] = "1"
+
 from vllm import LLM, SamplingParams
 from vllm.utils.torch_utils import get_kv_cache_torch_dtype
 from vllm.v1.attention.backends.registry import register_backend, AttentionBackendEnum
@@ -9,10 +13,6 @@ register_backend(
     AttentionBackendEnum.CUSTOM,
     "toy_flash_attn.ToyFlashAttentionBackend",
 )
-
-# Force offline resolution for locally cached models.
-os.environ["HF_HUB_OFFLINE"] = "1"
-os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 MODEL_CONFIGS = {
     "gpt2": {
