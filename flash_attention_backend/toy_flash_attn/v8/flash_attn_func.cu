@@ -390,30 +390,27 @@ TEMPLATE_PARAM __device__ inline void FlashAttnTrait<TEMPLATE_VAL>::splitkv_kern
             )
         )
     );
+
     auto sV = cute::make_tensor(
-        cute::make_smem_ptr(layout.v),
-        cute::make_layout(
-            cute::make_shape(cute::Int<KV_BLOCK>{}, cute::Int<HEAD_DIM>{}),
-            cute::LayoutRight{}
+        cute::make_smem_ptr(layout.v), 
+        cute::composition(
+            cute::Swizzle<3, 3>(),
+            cute::make_layout(
+                cute::make_shape(cute::Int<KV_BLOCK>{}, cute::Int<HEAD_DIM>{}),
+                cute::LayoutRight{}
+            )
         )
     );
     auto sVt = cute::make_tensor(
         sV.data(), 
-        cute::make_layout(
-            cute::make_shape(cute::Int<HEAD_DIM>{}, cute::Int<KV_BLOCK>{}),
-            cute::LayoutLeft{}
+        cute::composition(
+            cute::Swizzle<3, 3>(),
+            cute::make_layout(
+                cute::make_shape(cute::Int<HEAD_DIM>{}, cute::Int<KV_BLOCK>{}),
+                cute::LayoutLeft{}
+            )
         )
     );
-    // auto sOut = cute::make_tensor(
-    //     cute::make_smem_ptr(layout.out),
-    //     cute::composition(
-    //         cute::Swizzle<5, 0>{},
-    //         cute::make_layout(
-    //             cute::make_shape(param.q_per_kv_group, cute::Int<Q_BLOCK>{}, cute::Int<HEAD_DIM>{}),
-    //             cute::LayoutRight{}
-    //         )
-    //     )
-    // );
 
     // 定义算子 & 线程layout
     auto mma_qk = cute::make_tiled_mma(
