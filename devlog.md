@@ -65,6 +65,14 @@ Generated:  I am a software engineer with a passion for technology and a keen in
 | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
 | v8 | `void splitkv_kernel<c10::BFloat16, float, 128, 16, 64, 256, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5, T6, T7, T8>::ParamSet)` | 252.576 | 7.77 | 82.5 | 14.2 | 0.38 | 37.0 | 0.0 | low_occupancy, scheduler_starvation_risk, local_spill_risk, shared_bank_conflict_risk |
 
+5. 增加取消block_o让每元素都online更新acc_o, 将寄存器从176降低到144, 占用率回到将近20%， duration降低到214us
+
+| version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v8 | `void splitkv_kernel<c10::BFloat16, float, 128, 16, 64, 256, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5, T6, T7, T8>::ParamSet)` | 214.144 | 9.95 | 82.51 | 19.44 | 0.43 | 140.0 | 0.0 | low_occupancy, scheduler_starvation_risk, shared_bank_conflict_risk |
+
+另外结合ncu-ui分析，现在的瓶颈已经不在smem访存了，而是在cta排布。我们的cta拆分是grid size=112，前述4的ncu-rep可以看到每个SM处理6个CTA, 到该版本，每SM处理3个CTA。官方是采用更大的cta, 在测试case中是共16个cta, 配16个sm, 刚好完全并行，是最理想的情况。官方的实现中，应该是会根据问题规模做过理想cta推导。在该case的观察中， 官方实现，似乎用了超大cta, 开了smem允许超过48kb（实际78kb）。
+
 ### 20260607
 之前q_seqlen() == 1的断言实际没触发, 断言宏被禁用了, 实验时确认prefill阶段会污染,导致输出阶段出现"陆陆陆...". 按seqlen=1的特化方案中止.
 

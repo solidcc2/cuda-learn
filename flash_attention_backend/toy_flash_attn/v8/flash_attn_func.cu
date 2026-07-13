@@ -338,7 +338,7 @@ private:
     const ParamSet& param;
 };
 
-TEMPLATE_PARAM __device__ inline void FlashAttnTrait<TEMPLATE_VAL>::splitkv_kernel(ParamSet& param) {
+TEMPLATE_PARAM __device__ __forceinline__ void FlashAttnTrait<TEMPLATE_VAL>::splitkv_kernel(ParamSet& param) {
     extern __shared__ __align__(16) char smem[];
     param.device_init();
     TileLayout layout = TileLayout::builder(smem, param);
@@ -478,11 +478,14 @@ TEMPLATE_PARAM __device__ inline void FlashAttnTrait<TEMPLATE_VAL>::splitkv_kern
     auto acc_o_rowcol = cute::make_tensor(acc_o.data(), convert_layout_acc_rowcol(acc_o.layout()));
     auto acc_o_ids = thr_mma_pv.partition_C(cute::make_identity_tensor(cute::Shape<cute::Int<Q_BLOCK>, cute::Int<HEAD_DIM>>{}));
     auto acc_o_ids_rowcol = cute::make_tensor(acc_o_ids.data(),convert_layout_acc_rowcol(acc_o_ids.layout()));
+    cute::clear(acc_o);
+    cute::fill(old_max, -INFINITY);
+    cute::clear(old_sum);
 
-    auto block_max = cute::make_tensor<float>(cute::Shape<cute::Int<cute::size<0>(score_rowcol_view)>>{});
-    auto block_sum = cute::make_tensor<float>(cute::Shape<cute::Int<cute::size<0>(score_rowcol_view)>>{});
-    auto block_o = cute::partition_fragment_C(thr_mma_pv, cute::Shape<cute::Int<Q_BLOCK>, cute::Int<HEAD_DIM>>{});
-    auto block_o_rowcol = cute::make_tensor(block_o.data(),convert_layout_acc_rowcol(block_o.layout()));
+    // auto block_max = cute::make_tensor<float>(cute::Shape<cute::Int<cute::size<0>(score_rowcol_view)>>{});
+    // auto block_sum = cute::make_tensor<float>(cute::Shape<cute::Int<cute::size<0>(score_rowcol_view)>>{});
+    // auto block_o = cute::partition_fragment_C(thr_mma_pv, cute::Shape<cute::Int<Q_BLOCK>, cute::Int<HEAD_DIM>>{});
+    // auto block_o_rowcol = cute::make_tensor(block_o.data(),convert_layout_acc_rowcol(block_o.layout()));
     // load sQ
     layout.load_q_block_smem(param.q_block_id(), gQ_b, sQ);
     static_assert(KV_SPLIT % KV_BLOCK == 0);
@@ -544,16 +547,28 @@ TEMPLATE_PARAM __device__ inline void FlashAttnTrait<TEMPLATE_VAL>::splitkv_kern
             auto op_sum = [] __device__ (auto a, auto b) {return check_non_finite_val(a+b, "softmax_score_reduce");};
             inner_scalar_t r_max = reduce_thr(score_rowcol_view(r, cute::_), op_max);
             r_max = AllReduce<4>::run(r_max, op_max);   // 4是固定值， 因为m16n8k16算子里，每lane是2行2列4个val, n8/2列 = 4个lane归约
+            
+            float new_max = op_max(old_max(r), r_max);
+            float alpha = old_sum(r) == 0.0f ? 0.0f : exp2f((old_max(r) - new_max) * softmax_scale_log2);
+
             CUTE_UNROLL
-            for(int c = 0; c < cute::size<1>(score_rowcol_view); c++) {
-                auto v = score_rowcol_view(r, c);
-                v = exp2f((softmax_sub(v, r_max)) * softmax_scale_log2);
-                score_rowcol_view(r, c) = v;
+            for (int c = 0; c < cute::size<1>(acc_o_rowcol); ++c) {
+                acc_o_rowcol(r, c) *= alpha;
+            }
+
+            if (new_max == -INFINITY) {
+                cute::fill(score_rowcol_view(r, cute::_), 0.0f);
+            } else {
+                CUTE_UNROLL
+                for (int c = 0; c < cute::size<1>(score_rowcol_view); ++c) {
+                    score_rowcol_view(r, c) = exp2f(softmax_sub(score_rowcol_view(r, c), new_max) * softmax_scale_log2);
+                }
             }
             inner_scalar_t r_sum = reduce_thr(score_rowcol_view(r, cute::_), op_sum);
             r_sum = AllReduce<4>::run(r_sum, op_sum);
-            block_max(r) = r_max;
-            block_sum(r) = r_sum;
+            // old_sum(r) = old_sum(r) * alpha + r_sum;
+            old_sum(r) = fmaf(old_sum(r), alpha, r_sum);
+            old_max(r) = new_max;
         }
 
         // P @ V
@@ -563,7 +578,6 @@ TEMPLATE_PARAM __device__ inline void FlashAttnTrait<TEMPLATE_VAL>::splitkv_kern
             convert_layout_acc_Aregs(tCrP_bf16.layout())
         );
 
-        cute::clear(block_o);
         static_assert(decltype(cute::size<2>(tCrP))::value == KV_BLOCK / MMA_K);
         for(int64_t iK = 0; iK < KV_BLOCK / MMA_K; iK++) {
             auto sVt_K = cute::local_tile(
@@ -582,26 +596,7 @@ TEMPLATE_PARAM __device__ inline void FlashAttnTrait<TEMPLATE_VAL>::splitkv_kern
             cute::gemm(thr_mma_pv, 
                 tCrP(cute::_, cute::_, iK), 
                 tCrB(cute::_, cute::_, cute::_0{}), 
-                block_o);
-        }
-        // merge
-        if (kv_block_id == 0) {
-            cute::copy(block_sum, old_sum);
-            cute::copy(block_max, old_max);
-            cute::copy(block_o, acc_o);
-        } else {
-            CUTE_UNROLL
-            for (int r = 0; r < cute::size<0>(acc_o_rowcol); ++r) {
-                float new_max = max(old_max(r), block_max(r));
-                float alpha = old_sum(r) == 0.0f ? 0.0f : exp2f((old_max(r) - new_max) * softmax_scale_log2);
-                float beta = block_sum(r) == 0.0f ? 0.0f : exp2f((block_max(r) - new_max) * softmax_scale_log2);
-                CUTE_UNROLL
-                for (int c = 0; c < cute::size<1>(acc_o_rowcol); ++c) {
-                    acc_o_rowcol(r, c) = alpha * acc_o_rowcol(r, c) + beta  * block_o_rowcol(r, c);
-                }
-                old_sum(r) = alpha * old_sum(r) + beta * block_sum(r);
-                old_max(r) = new_max;
-            }
+                acc_o);
         }
 
         if (has_next_block) {
