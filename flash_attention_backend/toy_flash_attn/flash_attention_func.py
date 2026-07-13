@@ -219,6 +219,22 @@ elif _CUDA_IMPL_VERSION == "v7":
     )
     _ops.flash_attn_varlen_with_block_bf16fp32 = _ops.flash_attn_varlen_with_block_v7_64
     _ops.flash_attn_varlen_with_block_fp32fp32 = None
+elif _CUDA_IMPL_VERSION == "v8":
+    _ops = load(
+        name="toy_torch_flash_attention_func_v8",
+        sources=[
+            str(_THIS_DIR / "v8/flash_attn_func.cu"),
+        ],
+        extra_include_paths=[
+            str(_THIS_DIR / "v8"),
+            str(_THIS_DIR / "../../vllm_env/lib/python3.10/site-packages/flashinfer/data/cutlass/include")
+        ],
+        extra_cflags=["-O2"],
+        extra_cuda_cflags=["-O2", "-lineinfo", "--extended-lambda"],
+        verbose=True,
+    )
+    _ops.flash_attn_varlen_with_block_bf16fp32 = _ops.flash_attn_varlen_with_block_v8_64
+    _ops.flash_attn_varlen_with_block_fp32fp32 = None
 else:
     raise ValueError(
         "TOY_FLASH_ATTN_CUDA_VERSION must be one of 'v3', 'v4', 'v5', 'v6', or 'v7', "
