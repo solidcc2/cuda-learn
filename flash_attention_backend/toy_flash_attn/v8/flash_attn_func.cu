@@ -578,42 +578,74 @@ TEMPLATE_PARAM __device__ inline void FlashAttnTrait<TEMPLATE_VAL>::splitkv_kern
         }
         __syncthreads();
     }
-    // write split lse
-    const int32_t lane_id = threadIdx.x % WARP_SIZE;
-    if (lane_id % 4 == 0) {
-        CUTE_UNROLL
-        for (int r = 0; r < cute::size<0>(score_ids_rowcol); r++) {
-            auto coord = score_ids_rowcol(r, 0);
-            int64_t q_token_id = param.q_block_id() * Q_BLOCK + cute::get<0>(coord);
+    if (param.num_kv_splits > 1) {
+        // write split lse
+        const int32_t lane_id = threadIdx.x % WARP_SIZE;
+        if (lane_id % 4 == 0) {
+            CUTE_UNROLL
+            for (int r = 0; r < cute::size<0>(score_ids_rowcol); r++) {
+                auto coord = score_ids_rowcol(r, 0);
+                int64_t q_token_id = param.q_block_id() * Q_BLOCK + cute::get<0>(coord);
 
-            if (q_token_id < param.q_seqlen()) {
-                float split_lse = (old_sum(r) == 0.0f)
-                    ? -INFINITY
-                    : old_max(r) * softmax_scale_log2 + log2f(old_sum(r));
-                g_split_lse_batch(q_token_id, param.q_head_id(), param.kv_split_id()) = split_lse;
+                if (q_token_id < param.q_seqlen()) {
+                    float split_lse = (old_sum(r) == 0.0f)
+                        ? -INFINITY
+                        : old_max(r) * softmax_scale_log2 + log2f(old_sum(r));
+                    g_split_lse_batch(q_token_id, param.q_head_id(), param.kv_split_id()) = split_lse;
+                }
             }
         }
-    }
-    // write split output
-    CUTE_UNROLL
-    for (int r = 0; r < cute::size<0>(acc_o_rowcol); r++) {
-        const inner_scalar_t inv_sum = old_sum(r) > 0.0f ? 1.0f / old_sum(r) : 0.0f;
+        // write split output
         CUTE_UNROLL
-        for (int c = 0; c < cute::size<1>(acc_o_rowcol); c++) {
-            auto coord = acc_o_ids_rowcol(r, c);
-            auto [q_token_offset, head_dim_id] = coord;
+        for (int r = 0; r < cute::size<0>(acc_o_rowcol); r++) {
+            const inner_scalar_t inv_sum = old_sum(r) > 0.0f ? 1.0f / old_sum(r) : 0.0f;
+            CUTE_UNROLL
+            for (int c = 0; c < cute::size<1>(acc_o_rowcol); c++) {
+                auto coord = acc_o_ids_rowcol(r, c);
+                auto [q_token_offset, head_dim_id] = coord;
 
-            const int64_t q_token_id =
-                param.q_block_id() * Q_BLOCK + q_token_offset;
+                const int64_t q_token_id =
+                    param.q_block_id() * Q_BLOCK + q_token_offset;
 
-            if (q_token_id < param.q_seqlen() &&
-                head_dim_id < param.head_dim) {
-                g_split_o_batch(
-                    q_token_id,
-                    param.q_head_id(),
-                    param.kv_split_id(),
-                    head_dim_id
-                ) = acc_o_rowcol(r, c) * inv_sum;
+                if (q_token_id < param.q_seqlen() &&
+                    head_dim_id < param.head_dim) {
+                    g_split_o_batch(
+                        q_token_id,
+                        param.q_head_id(),
+                        param.kv_split_id(),
+                        head_dim_id
+                    ) = acc_o_rowcol(r, c) * inv_sum;
+                }
+            }
+        }
+    } else {
+        // num_kv_splits == 1: write directly to out, skip combine
+        auto g_out_batch = cute::make_tensor(
+            cute::make_gmem_ptr(
+                param.out + param.out_stride[0] * param.cu_seqlens_q[param.batch_id()]
+            ),
+            cute::make_shape(int64_t{param.q_seqlen()}, param.out_size[1], param.out_size[2]),
+            cute::make_stride(param.out_stride[0], param.out_stride[1], param.out_stride[2])
+        );
+        CUTE_UNROLL
+        for (int r = 0; r < cute::size<0>(acc_o_rowcol); r++) {
+            const inner_scalar_t inv_sum = old_sum(r) > 0.0f ? 1.0f / old_sum(r) : 0.0f;
+            CUTE_UNROLL
+            for (int c = 0; c < cute::size<1>(acc_o_rowcol); c++) {
+                auto coord = acc_o_ids_rowcol(r, c);
+                auto [q_token_offset, head_dim_id] = coord;
+
+                const int64_t q_token_id =
+                    param.q_block_id() * Q_BLOCK + q_token_offset;
+
+                if (q_token_id < param.q_seqlen() &&
+                    head_dim_id < param.head_dim) {
+                    g_out_batch(
+                        q_token_id,
+                        param.q_head_id(),
+                        head_dim_id
+                    ) = scalar_t(acc_o_rowcol(r, c) * inv_sum);
+                }
             }
         }
     }
@@ -817,10 +849,12 @@ TEMPLATE_PARAM torch::Tensor FlashAttnTrait<TEMPLATE_VAL>::flash_attn_varlen_wit
     cudaStream_t stream = at::cuda::getCurrentCUDAStream();
     ::splitkv_kernel<TEMPLATE_VAL><<<grid, block, TileLayout::size(param), stream>>>(param);
     // combine
-    dim3 combine_block(WARP_SIZE);
-    dim3 combine_grid(total_q, num_q_heads);
+    if (num_kv_splits > 1) {
+        dim3 combine_block(WARP_SIZE);
+        dim3 combine_grid(total_q, num_q_heads);
 
-    ::splitkv_combine_kernel<TEMPLATE_VAL> <<<combine_grid, combine_block, 0, stream>>>(param);
+        ::splitkv_combine_kernel<TEMPLATE_VAL> <<<combine_grid, combine_block, 0, stream>>>(param);
+    }
 
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return out;
