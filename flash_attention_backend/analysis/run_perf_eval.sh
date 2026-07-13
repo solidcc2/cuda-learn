@@ -222,7 +222,7 @@ run_op_case() {
 
 run_op() {
   local mode="$1"
-  local -a versions=("baseline" "v5" "v6" "v7" "official")
+  local -a versions=("baseline" "v5" "v6" "v7" "v8" "official")
   local -a cases
   if [[ "${mode}" == "full" ]]; then
     cases=(

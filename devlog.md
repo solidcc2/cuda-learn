@@ -32,6 +32,35 @@ Generated:  I am a software engineer with a passion for technology and a keen in
 ----------------------------------------
 ```
 
+2. 增加num_splitkv分流后的的ncu记录, 延迟相比v7版本，降低到和官方处在同一数量级。
+
+结合ncu-ui分析得到以下结论和优化方向：
+- bank conflict 80w 100%的集中在SM875_U16x8_LDSM_T的拷贝操作里。是次优优化方向。
+
+**CASE: b1_s2048_h64**
+| version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v7 | `void kernel_wrapper<c10::BFloat16, float, 16, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5>::ParamSet)` | 4786.368 | 0.29 | 52.05 | 8.34 | 0.17 | 63152.0 | 3584.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, shared_bank_conflict_risk |
+| v8 | `void splitkv_kernel<c10::BFloat16, float, 128, 16, 64, 256, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5, T6, T7, T8>::ParamSet)` | 224.8 | 6.34 | 85.09 | 20.21 | 0.47 | 810022.0 | 0.0 | low_occupancy, scheduler_starvation_risk, local_spill_risk, shared_bank_conflict_risk |
+| official | `void flash::flash_fwd_splitkv_kernel<Flash_fwd_kernel_traits<64, 64, 256, 4, 0, 0, cutlass::bfloat16_t, Flash_kernel_traits<64, 64, 256, 4, cutlass::bfloat16_t>>, 0, 0, 0, 0, 1, 0, 1, 0>(flash::Flash_fwd_params)` | 29.408 | 44.23 | 10.62 | 8.44 | 0.11 | 0.0 | 908.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, local_spill_risk |
+
+**CASE: b1_s128_h64**
+| version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v8 | `void splitkv_kernel<c10::BFloat16, float, 128, 16, 64, 256, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5, T6, T7, T8>::ParamSet)` | 46.88 | 3.11 | 79.14 | 8.15 | 0.18 | 100805.0 | 0.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, local_spill_risk, shared_bank_conflict_risk |
+| official | `void flash::flash_fwd_splitkv_kernel<Flash_fwd_kernel_traits<64, 64, 256, 4, 0, 0, cutlass::bfloat16_t, Flash_kernel_traits<64, 64, 256, 4, cutlass::bfloat16_t>>, 0, 0, 0, 0, 1, 0, 0, 0>(flash::Flash_fwd_params)` | 22.72 | 6.28 | 38.76 | 8.28 | 0.14 | 146.0 | 87.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, local_spill_risk, shared_bank_conflict_risk |
+
+## Comparison
+
+```json
+{
+  "versions": [
+    "v8",
+    "official"
+  ]
+}
+```
+
 ### 20260607
 之前q_seqlen() == 1的断言实际没触发, 断言宏被禁用了, 实验时确认prefill阶段会污染,导致输出阶段出现"陆陆陆...". 按seqlen=1的特化方案中止.
 

@@ -79,7 +79,7 @@ validate_versions() {
   IFS=',' read -r -a version_list <<<"${VERSIONS}"
   for version in "${version_list[@]}"; do
     case "${version}" in
-      v7|v6|official)
+      v8|v7|v6|official)
         ;;
       *)
         echo "unsupported ncu version: ${version}" >&2

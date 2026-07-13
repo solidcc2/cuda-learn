@@ -76,6 +76,15 @@ VERSION_CONFIGS: dict[str, VersionConfig] = {
         path_kind="paged",
         description="Custom CUDA paged path using v7 kernel.",
     ),
+    "v8": VersionConfig(
+        version="v8",
+        toy_flash_attn_use="bf16",
+        attention_backend="CUSTOM",
+        kv_cache_dtype="bfloat16",
+        cuda_version="v8",
+        path_kind="paged",
+        description="Custom CUDA paged split-kv path using v8 kernel.",
+    ),
     "official": VersionConfig(
         version="official",
         toy_flash_attn_use="official",
