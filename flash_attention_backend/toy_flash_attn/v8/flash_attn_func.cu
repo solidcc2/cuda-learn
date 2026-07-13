@@ -232,12 +232,20 @@ struct FlashAttnTrait<TEMPLATE_VAL>::TileLayout {
         }
     }
 
-    __device__ __forceinline__ void load_block_smem(int64_t phy_block_id, int64_t phy_in_kv_block_id, auto&& g_kv, auto&& s_kv) {
-        auto g_block_kv = g_kv(phy_block_id, cute::_, param.kv_head_id(), cute::_);
+    __device__ __forceinline__ void load_block_smem(int64_t phy_block_id, int64_t phy_in_kv_block_id, int64_t block_seq_begin, auto&& g_kv, auto&& s_kv) {
+        auto g_block_kv = cute::local_tile(
+            g_kv(phy_block_id, cute::_, param.kv_head_id(), cute::_),
+            cute::Shape<cute::Int<BLOCK_SIZE>, cute::Int<HEAD_DIM>>{},
+            cute::make_coord(cute::_0{}, cute::_0{})
+        );
         auto s_block_kv = cute::local_tile(
             s_kv,
             cute::Shape<cute::Int<BLOCK_SIZE>, cute::Int<HEAD_DIM>>{},
             cute::make_coord(phy_in_kv_block_id, cute::_0{})
+        );
+        // Build identity tensor for row-level validity checking
+        auto block_identity = cute::make_identity_tensor(
+            cute::Shape<cute::Int<BLOCK_SIZE>, cute::Int<HEAD_DIM>>{}
         );
         constexpr int32_t data_per_thr = sizeof(cute::uint128_t) / sizeof(scalar_t);
         constexpr int32_t thr_col = HEAD_DIM / data_per_thr;
@@ -251,15 +259,21 @@ struct FlashAttnTrait<TEMPLATE_VAL>::TileLayout {
             cute::LayoutRight{}
         );
         cute::TiledCopy copy_a = cute::make_tiled_copy(
-            cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>, scalar_t>{}, 
+            cute::Copy_Atom<cute::SM80_CP_ASYNC_CACHEGLOBAL<cute::uint128_t>, scalar_t>{},
             thr_layout, val_layout
         );
         auto thr_copy = copy_a.get_slice(threadIdx.x);
         if (threadIdx.x < cute::size(copy_a)) {
             auto src = thr_copy.partition_S(g_block_kv);
             auto dst = thr_copy.partition_D(s_block_kv);
-            // cute::clear(dst);
-            cute::copy(copy_a, src, dst);
+            auto src_id = thr_copy.partition_S(block_identity);
+            int valid_rows = min(int64_t{BLOCK_SIZE}, param.kv_seqlen() - block_seq_begin);
+            auto pred = cute::make_tensor<bool>(cute::shape(src));
+            for (int i = 0; i < cute::size(pred); i++) {
+                pred(i) = cute::get<0>(src_id(i)) < valid_rows;
+            }
+            cute::clear(dst);
+            cute::copy_if(copy_a, pred, src, dst);
         }
     }
 
@@ -273,8 +287,8 @@ struct FlashAttnTrait<TEMPLATE_VAL>::TileLayout {
                     param.bt_stride[1] * block_seq_begin / BLOCK_SIZE
                 ];
 
-                load_block_smem(phy_block_id, b, gK, sK);
-                load_block_smem(phy_block_id, b, gV, sV);
+                load_block_smem(phy_block_id, b, block_seq_begin, gK, sK);
+                load_block_smem(phy_block_id, b, block_seq_begin, gV, sV);
             } else {
                 clear_block_smem(b, sK);
                 clear_block_smem(b, sV);
@@ -320,7 +334,7 @@ struct FlashAttnTrait<TEMPLATE_VAL>::TileLayout {
             for(int i=0; i<cute::size(pred); i++){
                 pred(i) = cute::elem_less(src_id(i), cute::shape(q_head));
             }
-            // cute::clear(dst);
+            cute::clear(dst);
             cute::copy_if(copy_a, pred, src, dst);
         }
     }
