@@ -32,10 +32,10 @@ Generated:  I am a software engineer with a passion for technology and a keen in
 ----------------------------------------
 ```
 
-2. 增加num_splitkv分流后的的ncu记录, 延迟相比v7版本，降低到和官方处在同一数量级。
+2. 增加num_splitkv分流后（83bf5bb）的的ncu记录, 延迟相比v7版本，降低到和官方处在同一数量级。
 
 结合ncu-ui分析得到以下结论和优化方向：
-- bank conflict 80w 100%的集中在SM875_U16x8_LDSM_T的拷贝操作里。是次优优化方向。
+- bank conflict 80w 100%的集中在SM875_U16x8_LDSM_T的拷贝操作里。是优先可以解决的方向。
 
 **CASE: b1_s2048_h64**
 | version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
@@ -50,16 +50,15 @@ Generated:  I am a software engineer with a passion for technology and a keen in
 | v8 | `void splitkv_kernel<c10::BFloat16, float, 128, 16, 64, 256, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5, T6, T7, T8>::ParamSet)` | 46.88 | 3.11 | 79.14 | 8.15 | 0.18 | 100805.0 | 0.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, local_spill_risk, shared_bank_conflict_risk |
 | official | `void flash::flash_fwd_splitkv_kernel<Flash_fwd_kernel_traits<64, 64, 256, 4, 0, 0, cutlass::bfloat16_t, Flash_kernel_traits<64, 64, 256, 4, cutlass::bfloat16_t>>, 0, 0, 0, 0, 1, 0, 0, 0>(flash::Flash_fwd_params)` | 22.72 | 6.28 | 38.76 | 8.28 | 0.14 | 146.0 | 87.0 | underfilled_grid, low_occupancy, scheduler_starvation_risk, uncoalesced_global_access_risk, local_spill_risk, shared_bank_conflict_risk |
 
-## Comparison
+3. 给sV增加swizzle后（1b7626f），bank conflict明显下降，从80w -> 9706, ncu-ui提示主要瓶颈在stall wait。
 
-```json
-{
-  "versions": [
-    "v8",
-    "official"
-  ]
-}
-```
+> 优化后，虽然bank conflict大幅优化，但是dram传输峰值下降，占用率下降， warp发射率下降，综合理解应该是swizzle引入的计算成本。让本来卡在计算上的stall wait加重了。整体方向应该没错，这部分开销是符合预期的，下一步应该优先找到计算sync时的热点并消除。
+
+**CASE: b1_s2048_h64**
+| version | kernel | duration(us) | dram % | l2 hit % | occupancy % | eligible warps/sched | shared bank conflicts | global excessive sectors | labels |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| v8 | `void splitkv_kernel<c10::BFloat16, float, 128, 16, 64, 256, 32, 64>(FlashAttnTrait<T1, T2, T3, T4, T5, T6, T7, T8>::ParamSet)` | 259.552 | 5.6 | 84.98 | 14.75 | 0.37 | 9706.0 | 0.0 | low_occupancy, scheduler_starvation_risk, local_spill_risk, shared_bank_conflict_risk |
+
 
 ### 20260607
 之前q_seqlen() == 1的断言实际没触发, 断言宏被禁用了, 实验时确认prefill阶段会污染,导致输出阶段出现"陆陆陆...". 按seqlen=1的特化方案中止.
