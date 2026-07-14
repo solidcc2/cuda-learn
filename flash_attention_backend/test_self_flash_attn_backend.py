@@ -25,7 +25,7 @@ MODEL_CONFIGS = {
     },
 }
 if os.getenv("TOY_FLASH_ATTN_CUDA_VERSION") is None:
-    os.environ["TOY_FLASH_ATTN_CUDA_VERSION"] = "v7"
+    os.environ["TOY_FLASH_ATTN_CUDA_VERSION"] = "v8"
 
 def _attention_config() -> tuple[str, str, str]:
     impl = os.environ.get("TOY_FLASH_ATTN_USE", "bf16")
@@ -90,7 +90,7 @@ def main() -> None:
         model=model_config["model"],
         revision=model_revision,
         tokenizer_revision=model_revision,
-        max_model_len=512,
+        max_model_len=2048,
         gpu_memory_utilization=0.8,
         max_num_seqs=args.batch_size,
         attention_backend=attention_backend,

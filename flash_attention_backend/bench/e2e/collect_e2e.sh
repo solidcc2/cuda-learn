@@ -95,7 +95,7 @@ main() {
   fi
 
   mapfile -t cases < <(expand_cases "$@")
-  local versions=("baseline" "v5" "v6" "v7" "official")
+  local versions=("baseline" "v5" "v6" "v7" "v8" "official")
   for case_name in "${cases[@]}"; do
     for version in "${versions[@]}"; do
       run_case "${version}" "${case_name}"
